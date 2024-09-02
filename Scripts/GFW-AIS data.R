@@ -1,74 +1,64 @@
-install.packages("httr")
-install.packages("jsonlite")
-install.packages("dplyr")
+# Load required libraries
+library(tidyverse)
 
-library(httr)
-library(jsonlite)
-library(dplyr)
+# Set the path to the 2016 folder
+path <- "Data/AIS Fishing Effort 2016-2020"
 
-# Define your API key
-api_key <- "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImtpZEtleSJ9.eyJkYXRhIjp7Im5hbWUiOiJNb3V0b24gMjAyNCIsInVzZXJJZCI6MzIzMjgsImFwcGxpY2F0aW9uTmFtZSI6Ik1vdXRvbiAyMDI0IiwiaWQiOjE3OTcsInR5cGUiOiJ1c2VyLWFwcGxpY2F0aW9uIn0sImlhdCI6MTcyNDk0MDcwNywiZXhwIjoyMDQwMzAwNzA3LCJhdWQiOiJnZnciLCJpc3MiOiJnZncifQ.TeQwgWvv0L3PgXucOi8XH7REXiO0JzbdYpZEeqYaCnIEfTBpQsAGsacWg02jJ0wIXR557-KEd0hKmbuaShwIiZYZlt2D-wcpsKeinMs4iI4ABqCf10rYfXu5LsiIcpmSaaNFQZosqHlKrUmJUAByxpScXFLvVT9IUu57ZQz1OORH4WjQWdVa0pErsj3Vc2cfQU90y4W6nJTsVzMKxxUWyITJ5tWno-6S3HlxHgy4h-oxdhs6tQj4PRlCsgN2pruLym4qMaExLLnsS3WwyzF3Q0AqugnR3b7vj5qCcEuUAhgQ6LnuVdiOV0EU7fKra9Rqp4kVi-ulobH9nKb9f4XudpA4lHqsyNu8PmSMANg8710QIwPOD-rtZVmbOqyPgQmki60LIa1spVx3IHqu35Zakvtdbs7UvfZdib4SHd74ps4r8UAVOFJnVTeh1Nn8j9XIQqxSUaltjBLkD3oyVpB_YCO_pZ0Uae16GBa2KvK4L2dwmzQNm957PYSqJ31FjaZ1"
+# List all CSV files in the folder
+AIS_csv_files <- list.files(path = path, pattern = "*.csv", full.names = TRUE, recursive = TRUE)
 
-# Define the base URLs for AIS and SAR data
-ais_url <- "https://gateway.api.globalfishingwatch.org/v2/fishing-activity"
-sar_url <- "https://gateway.api.globalfishingwatch.org/v1/dark-vessel-detections"
+# Read all CSV files and combine them into a single data frame
+AIS_fishing <- csv_files %>%
+  map_df(~read_csv(.))
 
-# Define the bounding box for the entire world
-bbox <- "-180,-90,180,90"
+# Print the first few rows and basic information about the combined data frame
+print(head(AIS_fishing))
+print(str(AIS_fishing))
 
-# Define the start and end dates
-start_date <- "2018-01-01"
-end_date <- "2023-12-31"
+# Load required libraries if not already loaded
+library(maps)
+library(viridis)
 
-# Create a sequence of yearly intervals
-years <- seq(as.Date("2018-01-01"), as.Date("2023-01-01"), by = "year")
+# Aggregate fishing hours by latitude and longitude
+aggregated_AIS_fishing <- AIS_fishing %>%
+  group_by(cell_ll_lat, cell_ll_lon) %>%
+  summarise(total_fishing_hours = sum(fishing_hours, na.rm = TRUE)) %>%
+  ungroup() %>%
+  # Remove any cells with zero or negative fishing hours
+  filter(total_fishing_hours > 0)
 
-#Function to download data
-download_gfw_data <- function(api_url, start_date, end_date, bbox, api_key) {
-  params <- list(
-    startDate = start_date,
-    endDate = end_date,
-    bbox = bbox
+# Check the range of our data
+print(summary(aggregated_AIS_fishing$total_fishing_hours))
+
+# Create the world map
+world_map <- map_data("world")
+
+# Create the plot
+ggplot() +
+  geom_map(data = world_map, map = world_map,
+           aes(long, lat, map_id = region),
+           color = "black", fill = "lightgray", size = 0.1) +
+  geom_tile(data = aggregated_AIS_fishing, 
+            aes(x = cell_ll_lon, y = cell_ll_lat, fill = total_fishing_hours)) +
+  scale_fill_viridis(
+    option = "inferno",
+    direction = -1,
+    trans = "log1p",
+    name = "AIS Fishing Effort (2016-2020)", 
+    breaks = c(0, 1, 10, 100, 1000, 10000),
+    labels = scales::comma,
+    guide = guide_colorbar(barwidth = 15, barheight = 0.5, title.position = "top", title.hjust = 0.5)
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = NULL,
+       x = "Longitude", y = "Latitude") +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.margin = margin(t = 20, r = 0, b = 0, l = 0),
+    legend.title = element_text(margin = margin(b = 10))
   )
-  
-  headers <- add_headers(Authorization = paste("Bearer", api_key))
-  
-  response <- GET(api_url, query = params, headers)
-  
-  if (status_code(response) == 200) {
-    data <- content(response, as = "parsed", type = "application/json")
-    df <- as.data.frame(data)
-    return(df)
-  } else {
-    stop("Failed to retrieve data. Status code: ", status_code(response))
-  }
-}
 
-# Try a simpler request to test if the base API is reachable
-test_api_call_ais <- function() {
-  api_key <- "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImtpZEtleSJ9.eyJkYXRhIjp7Im5hbWUiOiJNb3V0b24gMjAyNCIsInVzZXJJZCI6MzIzMjgsImFwcGxpY2F0aW9uTmFtZSI6Ik1vdXRvbiAyMDI0IiwiaWQiOjE3OTcsInR5cGUiOiJ1c2VyLWFwcGxpY2F0aW9uIn0sImlhdCI6MTcyNDk0MDcwNywiZXhwIjoyMDQwMzAwNzA3LCJhdWQiOiJnZnciLCJpc3MiOiJnZncifQ.TeQwgWvv0L3PgXucOi8XH7REXiO0JzbdYpZEeqYaCnIEfTBpQsAGsacWg02jJ0wIXR557-KEd0hKmbuaShwIiZYZlt2D-wcpsKeinMs4iI4ABqCf10rYfXu5LsiIcpmSaaNFQZosqHlKrUmJUAByxpScXFLvVT9IUu57ZQz1OORH4WjQWdVa0pErsj3Vc2cfQU90y4W6nJTsVzMKxxUWyITJ5tWno-6S3HlxHgy4h-oxdhs6tQj4PRlCsgN2pruLym4qMaExLLnsS3WwyzF3Q0AqugnR3b7vj5qCcEuUAhgQ6LnuVdiOV0EU7fKra9Rqp4kVi-ulobH9nKb9f4XudpA4lHqsyNu8PmSMANg8710QIwPOD-rtZVmbOqyPgQmki60LIa1spVx3IHqu35Zakvtdbs7UvfZdib4SHd74ps4r8UAVOFJnVTeh1Nn8j9XIQqxSUaltjBLkD3oyVpB_YCO_pZ0Uae16GBa2KvK4L2dwmzQNm957PYSqJ31FjaZ1"
-  url <- "https://gateway.api.globalfishingwatch.org/v3/ais-data"  # Hypothetical endpoint
-  params <- list(
-    startDate = "2018-01-01T00:00:00Z",
-    endDate = "2018-12-31T23:59:59Z",
-    bbox = "-180,-90,180,90"
-  )
-  headers <- add_headers(Authorization = paste("Bearer", api_key))
-  
-  response <- GET(url, query = params, headers)
-  
-  if (status_code(response) == 200) {
-    return(content(response, as = "text", encoding = "UTF-8"))
-  } else {
-    cat("Failed to retrieve data. Status code:", status_code(response), "\n")
-    cat(content(response, as = "text", encoding = "UTF-8"))
-    stop()
-  }
-}
-
-# Call the test function to see if it works
-test_output_ais <- test_api_call_ais()
-print(test_output_ais)
-
-
-
+# Save the plot
