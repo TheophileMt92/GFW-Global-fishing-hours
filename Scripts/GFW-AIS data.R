@@ -2,13 +2,13 @@
 library(tidyverse)
 
 # Set the path to the 2016 folder
-path <- "Data/AIS Fishing Effort 2016-2020"
+path <- "Data/AIS Fishing Effort 2017-2020"
 
 # List all CSV files in the folder
 AIS_csv_files <- list.files(path = path, pattern = "*.csv", full.names = TRUE, recursive = TRUE)
 
 # Read all CSV files and combine them into a single data frame
-AIS_fishing <- csv_files %>%
+AIS_fishing <- AIS_csv_files %>%
   map_df(~read_csv(.))
 
 # Print the first few rows and basic information about the combined data frame
@@ -61,4 +61,3 @@ ggplot() +
     legend.title = element_text(margin = margin(b = 10))
   )
 
-# Save the plot
