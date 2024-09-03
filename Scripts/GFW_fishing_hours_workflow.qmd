@@ -498,7 +498,7 @@ predicted_plot_1deg <- ggplot() +
   coord_fixed(1.3) +
   theme_minimal() +
   labs(title = "Global Fishing Hours (1 degree resolution)",
-       subtitle = "Based on AIS data and Random Forest predictions from SAR data made at 0.1 degree resolution",
+       subtitle = "Based on AIS data and Random Forest predictions from SAR data made at \n 0.1 degree resolution",
        x = "Longitude", y = "Latitude") +
   theme(
     legend.position = "bottom",
@@ -600,12 +600,17 @@ kable(results_table, format = "html", digits = 4, caption = "Model Evaluation Me
 # For feature importance, create a separate table
 feature_importance <- as.data.frame(results_no_transform$`Feature Importance`)
 feature_importance$Feature <- rownames(feature_importance)
-feature_importance <- feature_importance[, c("Feature", "IncNodePurity")]
-colnames(feature_importance) <- c("Feature", "Importance")
+feature_importance <- feature_importance[, c("Feature", "%IncMSE", "IncNodePurity")]
+colnames(feature_importance) <- c("Feature", "%IncMSE", "IncNodePurity")
+
+# Sort the feature importance table by %IncMSE in descending order
+feature_importance <- feature_importance[order(-feature_importance$`%IncMSE`), ]
 
 kable(feature_importance, format = "html", digits = 4, caption = "Feature Importance") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                full_width = FALSE, position = "center")
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:3, width = "150px")
 ```
 
 Model evaluation interpretation:
