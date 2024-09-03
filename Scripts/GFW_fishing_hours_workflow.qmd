@@ -1,6 +1,7 @@
 ---
 title: "Global_fishing_watch_workflow"
 author: "Théophile L. Mouton"
+date: "`r Sys.Date()`"
 format:
   html:
     toc: true
@@ -17,7 +18,7 @@ params:
   printlabels: TRUE
 ---
 
-# 1. Combining AIS and Sentinel-1 SAR fishing effort data from Global Fishing Watch at a 0.1 Degree resolution
+# Combining AIS and Sentinel-1 SAR fishing effort data from Global Fishing Watch
 
 ## Open R libraries
 
@@ -34,11 +35,15 @@ library(dplyr)
 library(randomForest)
 library(caret)
 library(pdp)
+library(knitr)
+library(kableExtra)
 ```
 
-## AIS data (2017-2020)
-Data from Kroodsma et al. (2018) Science, accessible at: https://globalfishingwatch.org/data-download/datasets/public-fishing-effort 
-The data is accessible up to the end of the year 2020. 
+## AIS data
+
+Data from Kroodsma et al. (2018) Science, accessible at: [Global Fishing Watch Data Download Portal](https://globalfishingwatch.org/data-download/datasets/public-fishing-effort).
+
+The data is accessible up to the end of the year 2020, we used four entire years of data (2017, 2018, 2019, 2020) to match SAR data records.
 
 ```{r}
 # Set the path to the 2017-2020 folder
@@ -112,8 +117,11 @@ ggplot() +
   )
 ```
 
-## Sentinel-1 SAR data (2017-2020)
-Data from Paolo et al. 2024 Nature, accessible at: https://globalfishingwatch.org/data-download/datasets/public-sar-vessel-detections:v20231026 The data is accessible from 2017 to today, we used four entire years of data (2017,2018,2019,2020) to match AIS records. 
+## Sentinel-1 SAR data
+
+Data from Paolo et al. 2024 Nature, accessible at: [Global Fishing Watch SAR Vessel Detections](https://globalfishingwatch.org/data-download/datasets/public-sar-vessel-detections:v20231026)
+
+The data is accessible from 2017 to today, we used four entire years of data (2017, 2018, 2019, 2020) to match AIS records.
 
 ```{r}
 # Set the path to the 2016 folder
@@ -187,7 +195,9 @@ ggplot() +
 ```
 
 ## Compare AIS, and SAR detection locations
-Identifying grid cells with only AIS, only SAR detections or both data types. 
+
+Identifying grid cells with only AIS, only SAR detections or both data types.
+
 ```{r}
 # Merge the datasets
 combined_data <- full_join(
@@ -242,13 +252,26 @@ print(world_plot)
 # Get summary statistics
 summary_stats <- combined_data %>% 
   count(category) %>% 
-  mutate(percentage = n / sum(n) * 100)
+  mutate(percentage = n / sum(n) * 100) %>%
+  rename(`Number of cells` = n) %>%
+  mutate(percentage = round(percentage, 2))
 
-print(summary_stats)
+# Create and display the table
+kable(summary_stats, 
+      format = "html", 
+      col.names = c("Category", "Number of cells", "Percentage (%)"),
+      caption = "Summary Statistics of Data Categories") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, 
+                position = "center") %>%
+  column_spec(2, width = "150px") %>%
+  column_spec(3, width = "150px")
 ```
 
 ## Random forest model
-Predicting fishing hours in areas with only SAR data at 0.1 degree resolution. Using a random forest model of >160,000 associations between SAR vessel detections and AIS fishing hours globally. 
+
+Predicting fishing hours in areas with only SAR data at a 0.1 degree resolution. Using a random forest model of \>160,000 associations between SAR vessel detections and AIS fishing hours globally.
+
 ```{r}
 
 #---- Open the AIS data 
@@ -417,7 +440,7 @@ predicted_plot <- ggplot() +
     option = "inferno",
     direction = -1,
     trans = "log1p",
-    name = "Predicted fishing hours (2017-2020)", 
+    name = "AIS Fishing Effort (hours; 2017-2020)", 
     breaks = c(0, 1, 10, 100, 1000, 10000, 100000, 1000000),
     labels = scales::comma,
     guide = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top", title.hjust = 0.5)
@@ -467,7 +490,7 @@ predicted_plot_1deg <- ggplot() +
     option = "inferno",
     direction = -1,
     trans = "log1p",
-    name = "Predicted fishing hours (2017-2020)", 
+    name = "AIS Fishing Effort (hours; 2017-2020)", 
     breaks = c(0, 1, 10, 100, 1000, 10000, 100000, 1000000),
     labels = scales::comma,
     guide = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top", title.hjust = 0.5)
@@ -521,15 +544,15 @@ evaluate_model <- function(model, data, log_target = FALSE) {
   feature_importance <- importance(model)
   
   return(list(
-    MAE = mae,                            # Mean Absolute Error
-    RMSE = rmse,                          # Root Mean Squared Error
-    MAPE = mape,                          # Mean Absolute Percentage Error
-    MedAE = medae,                        # Median Absolute Error
-    R_squared = r_squared,                # R-Squared (Coefficient of Determination)
-    Adjusted_R_squared = adj_r_squared,   # Adjusted R-Squared
-    Mean_Residual = mean_residual,        # Mean of Residuals
-    SD_Residual = sd_residual,            # Standard Deviation of Residuals
-    Feature_Importance = feature_importance # Feature Importance (for Random Forest)
+    "Mean Absolute Error" = mae,          # Mean Absolute Error
+    "Root Mean Squared Error" = rmse,     # Root Mean Squared Error
+    "Mean Absolute Percentage Error" = mape,                          # Mean Absolute Percentage Error
+    "Median Absolute Error" = medae,                        # Median Absolute Error
+    "R-Squared" = r_squared,                # R-Squared (Coefficient of Determination)
+    "Adjusted R-Squared" = adj_r_squared,   # Adjusted R-Squared
+    "Mean of Residuals" = mean_residual,        # Mean of Residuals
+    "Standard Deviation of Residuals" = sd_residual,            # Standard Deviation of Residuals
+    "Feature Importance" = feature_importance # Feature Importance 
   ))
 }
 
@@ -553,7 +576,36 @@ combined_data_01deg <- full_join(
 # Evaluate all models
 validation_data <- combined_data_01deg %>% filter(data_category == "Both AIS and SAR")
 results_no_transform <- evaluate_model(rf_model, validation_data)
-print(results_no_transform)
+
+# Create a dataframe for the table
+results_table <- data.frame(
+  Metric = c("Mean Absolute Error", "Root Mean Squared Error", "Mean Absolute Percentage Error",
+             "Median Absolute Error", "R-Squared", "Adjusted R-Squared",
+             "Mean of Residuals", "Standard Deviation of Residuals"),
+  Value = c(results_no_transform$`Mean Absolute Error`,
+            results_no_transform$`Root Mean Squared Error`,
+            results_no_transform$`Mean Absolute Percentage Error`,
+            results_no_transform$`Median Absolute Error`,
+            results_no_transform$`R-Squared`,
+            results_no_transform$`Adjusted R-Squared`,
+            results_no_transform$`Mean of Residuals`,
+            results_no_transform$`Standard Deviation of Residuals`)
+)
+
+# Create and display the table
+kable(results_table, format = "html", digits = 4, caption = "Model Evaluation Metrics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center")
+
+# For feature importance, create a separate table
+feature_importance <- as.data.frame(results_no_transform$`Feature Importance`)
+feature_importance$Feature <- rownames(feature_importance)
+feature_importance <- feature_importance[, c("Feature", "IncNodePurity")]
+colnames(feature_importance) <- c("Feature", "Importance")
+
+kable(feature_importance, format = "html", digits = 4, caption = "Feature Importance") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center")
 ```
 
 Model evaluation interpretation:
@@ -562,6 +614,6 @@ Strengths: The model explains a large portion of the variance in the data (high 
 
 Weaknesses: The high RMSE, MAPE, and SD of residuals indicate the presence of some large errors and possible outliers that are skewing the results. The very high MAPE is particularly concerning, suggesting that the model may struggle with predictions for certain instances, possibly due to the nature of the data.
 
-Feature Importance: The model relies heavily on the total_presence_score feature, with location features also playing significant roles.
+Feature Importance: The model relies heavily on the total_presence_score (total vessel detections) feature, with geographical location features also playing significant roles.
 
 To improve the model, consider investigating the outliers and errors, potentially refining the model or using alternative modeling approaches that might handle these cases better.
