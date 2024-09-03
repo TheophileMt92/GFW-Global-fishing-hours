@@ -11,6 +11,8 @@ AIS_csv_files <- list.files(path = path, pattern = "*.csv", full.names = TRUE, r
 AIS_fishing <- AIS_csv_files %>%
   map_df(~read_csv(.))
 
+save(AIS_fishing, file="Data/AIS_fishing.Rdata")
+
 # Print the first few rows and basic information about the combined data frame
 print(head(AIS_fishing))
 print(str(AIS_fishing))

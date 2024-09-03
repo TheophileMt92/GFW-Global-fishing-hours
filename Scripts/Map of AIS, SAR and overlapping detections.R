@@ -21,9 +21,6 @@ AIS_data_std <- aggregated_AIS_fishing %>%
   group_by(lon_std, lat_std) %>%
   summarise(total_fishing_hours = sum(total_fishing_hours, na.rm = TRUE), .groups = "drop")
 
-head(AIS_data_std)
-summary(AIS_data_std$total_fishing_hours)
-
 # Create the plot
 ggplot() +
   geom_map(data = world_map, map = world_map,

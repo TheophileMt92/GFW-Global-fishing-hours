@@ -11,6 +11,8 @@ SAR_csv_files <- list.files(path = path, pattern = "*.csv", full.names = TRUE)
 SAR_fishing <- SAR_csv_files %>%
   map_df(~read_csv(.))
 
+save(SAR_fishing, file="Data/SAR_fishing.Rdata")
+
 # Print the first few rows and basic information about the combined data frame
 print(head(SAR_fishing))
 print(str(SAR_fishing))
