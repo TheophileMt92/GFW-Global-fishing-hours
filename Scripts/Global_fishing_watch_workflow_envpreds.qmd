@@ -40,6 +40,8 @@ library(pdp)
 library(knitr)
 library(kableExtra)
 library(future)
+library(spdep)
+library(ncf)
 ```
 
 ## AIS data
@@ -581,9 +583,85 @@ colnames(feature_importance) <- c("Feature", "%IncMSE", "IncNodePurity")
 # Sort the feature importance table by %IncMSE in descending order
 feature_importance <- feature_importance[order(-feature_importance$`%IncMSE`), ]
 
-kable(feature_importance, format = "html", digits = 4, caption = "Feature Importance") %>%
+kable(feature_importance, format = "html", digits = 4, 
+      col.names = c("Feature", "%IncMSE", "IncNodePurity"),
+      caption = "Feature Importance") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
                 full_width = FALSE, position = "center") %>%
   column_spec(1, bold = TRUE) %>%
   column_spec(2:3, width = "150px")
+
+#Test for spatial auto-correlation 
+
+##------------ Create a non-random test set 
+# Prepare the data
+data <- combined_data_with_rasters %>%
+  filter(has_AIS & has_SAR) %>%
+  dplyr::select(total_fishing_hours, total_presence_score, lon_std, lat_std, dist_shore, dist_ports, bathy) %>%
+  na.omit()
+
+# Split the data into training and test sets
+set.seed(123)  # for reproducibility
+train_indices <- sample(1:nrow(data), 0.7 * nrow(data))
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+
+# Train the random forest model
+#set.seed(123)  # for reproducibility
+#rf_timing <- system.time({
+#  rf_model_env <- randomForest(
+#    total_fishing_hours ~ total_presence_score + lon_std + lat_std + dist_shore + dist_ports + bathy,
+#    data = train_data,
+#    ntree = 500,
+#    importance = TRUE
+#  )
+#})
+
+#cat("Random Forest model training time:", rf_timing["elapsed"], "seconds\n")
+
+# Save the new model
+#rf_model_env_train=rf_model_env
+#save(rf_model_env_train, file = "rf_model_01deg_with_rasters_train.Rdata")
+load(here::here("rf_model_01deg_with_rasters_train.Rdata"))
+
+# Make predictions on the test set
+test_data$predictions <- predict(rf_model_env_train, test_data)
+
+# Calculate residuals
+test_data$residuals <- test_data$total_fishing_hours - test_data$predictions
+
+# Prepare spatial data for autocorrelation analysis
+test_data_sf <- st_as_sf(test_data, coords = c("lon_std", "lat_std"), crs = 4326)
+
+# Create a neighbors list
+k <- 8  # You can adjust this number
+nb <- knearneigh(st_coordinates(test_data_sf), k = k)
+nb <- knn2nb(nb)
+
+# Create a spatial weights matrix
+lw <- nb2listw(nb, style="W")
+
+# Perform Moran's I test on the test set residuals
+moran_test <- moran.test(test_data_sf$residuals, lw)
+
+# Create a data frame with the test results
+  moran_results <- data.frame(
+    Statistic = c("Moran I statistic", "Expectation", "Variance", "Standard deviate", "P-value"),
+    Value = c(
+      round(moran_test$estimate[1],2),
+      round(moran_test$estimate[2],2),
+      round(moran_test$estimate[3],2),
+      round(moran_test$statistic,2),
+      ifelse(moran_test$p.value < 2.2e-16, "< 2.2e-16", format(moran_test$p.value, scientific = TRUE, digits = 4))
+    )
+  )
+  
+ # Create and display the table
+  kable(moran_results, format = "html", col.names = c("Statistic", "Value"),
+        caption = "Moran I Test under randomisation") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                  full_width = FALSE,
+                  position = "center") %>%
+    column_spec(1, bold = TRUE) %>%
+    column_spec(2, width = "15em")
 ```
