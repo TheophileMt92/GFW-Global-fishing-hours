@@ -42,6 +42,9 @@ library(kableExtra)
 library(future)
 library(spdep)
 library(ncf)
+library(blockCV)
+library(doParallel)
+library(sp)
 ```
 
 ## AIS data
@@ -278,7 +281,6 @@ kable(summary_stats,
 Predicting fishing hours in areas with only SAR data at a 0.1 degree resolution. Using a random forest model of \>160,000 associations between SAR vessel detections and AIS fishing hours globally, geographical coordinates, distance to ports, distance to shore and bathymetry.
 
 ```{r}
-
 # Open the saved adjusted rasters
 Ports_adjusted <- raster(here::here("Data", "Environmental data layers", "distance-from-port-0.1deg-adjusted.tif"))
 Shore_adjusted <- raster(here::here("Data", "Environmental data layers", "distance-from-shore-0.1deg-adjusted.tif"))
@@ -462,6 +464,8 @@ aggregated_data <- combined_data_05deg %>%
     .groups = 'drop'
   )
 
+save(aggregated_data, file=here::here("Predicted_Fishing_Hours_05Deg.Rdata"))
+
 # Create the map
 predicted_plot_05deg <- ggplot() +
   geom_map(data = world_map, map = world_map,
@@ -551,7 +555,6 @@ validation_data <- combined_data_with_rasters %>%
 # Evaluate all models
 validation_data <- validation_data %>% filter(data_category == "Both AIS and SAR")
 results_rf_env <- evaluate_model(rf_model_env, validation_data)
-
 
 # Create a dataframe for the table
 results_table <- data.frame(
@@ -664,4 +667,176 @@ moran_test <- moran.test(test_data_sf$residuals, lw)
                   position = "center") %>%
     column_spec(1, bold = TRUE) %>%
     column_spec(2, width = "15em")
+```
+
+### Spatial cross-validation 
+```{r}
+
+# Assuming your training_data has lon_std (longitude) and lat_std (latitude) columns
+coords <- SpatialPoints(training_data[, c("lon_std", "lat_std")])
+
+# Combine your training data with spatial coordinates
+spatial_data <- SpatialPointsDataFrame(coords, data = training_data)
+
+#Testing to split the coordinates with k-means clustering
+# Ensure spatial_data is an sf object
+if (!inherits(spatial_data, "sf")) {
+  spatial_data_sf <- st_as_sf(spatial_data)
+} else {
+  spatial_data_sf <- spatial_data
+}
+
+# Extract coordinates
+coords <- st_coordinates(spatial_data_sf)
+
+# Perform k-means clustering
+set.seed(123)  # for reproducibility
+kmeans_result <- kmeans(coords, centers = 6)
+
+# Add cluster assignments to the sf object
+spatial_data_sf$block <- as.factor(kmeans_result$cluster)
+
+# Create the plot
+ggplot() +
+  geom_sf(data = spatial_data_sf, aes(color = block), size = 1) +
+  scale_color_viridis_d(name = "Block") +
+  theme_minimal() +
+  labs(title = "Spatial Blocks for 6-Fold Cross-Validation",
+       subtitle = "Points colored by block assignment") +
+  theme(legend.position = "bottom")
+
+# Register cores for parallel processing (use 1 less than your total cores)
+#cl <- makeCluster(detectCores() - 1)
+#registerDoParallel(cl)
+
+# Initialize a list to store results
+#results <- foreach(i = 1:6, .packages = c("randomForest", "dplyr"), .export = "spatial_data_sf") %dopar% {
+  
+  # Get the indices of the training and test sets for the i-th block
+#  test_indices <- spatial_data_sf$block == i
+#  train_data <- spatial_data_sf[!test_indices, ]
+#  test_data <- spatial_data_sf[test_indices, ]
+  
+  # Train Random Forest on the training data
+#  rf_model <- randomForest(
+#    total_fishing_hours ~ total_presence_score + lon_std + lat_std + dist_shore + dist_ports + bathy,
+#    data = train_data,
+#    ntree = 500,
+#    importance = TRUE
+#  )
+  
+  # Save the model
+#  model_filename <- paste0("rf_model_fold_", i, ".rds")
+#  saveRDS(rf_model, file = model_filename)
+  
+  # Predict on the test data
+#  predictions <- predict(rf_model, test_data)
+  
+  # Return a list with results and model filename
+#  list(
+#    results = data.frame(observed = test_data$total_fishing_hours, predicted = predictions, fold = i),
+#    model_filename = model_filename
+#  )
+#}
+
+# Stop the cluster once done
+#stopCluster(cl)
+
+# Extract results and model filenames
+#results_df <- do.call(rbind, lapply(results, function(x) x$results))
+#model_filenames <- sapply(results, function(x) x$model_filename)
+
+# Save results
+#save(results_df, file = "spatial_cv_results.RData")
+#save(model_filenames, file = "model_filenames.RData")
+
+load("spatial_cv_results.RData")
+load("model_filenames.RData")
+
+# Ensure spatial_data and results_df are aligned
+#spatial_data <- spatial_data[order(row.names(spatial_data)), ]
+#results_df <- results_df[order(row.names(results_df)), ]
+
+# Get all coordinates
+#all_coordinates <- coordinates(spatial_data)
+
+# Create neighbor list for the entire dataset
+#k <- 30  # Number of nearest neighbors, adjust as needed
+#nb_all <- knn2nb(knearneigh(all_coordinates, k = k))
+
+# Create spatial weights for the entire dataset
+#lw_all <- nb2listw(nb_all, style="W", zero.policy = TRUE)
+
+# Function to calculate Moran's I
+#calculate_morans_i <- function(residuals, indices, lw_all) {
+  # Create a logical vector for subsetting
+#  subset_vector <- rep(FALSE, length(lw_all$neighbours))
+#  subset_vector[indices] <- TRUE
+  
+  # Subset the weights list for the current fold
+#  lw_subset <- subset.listw(lw_all, subset_vector, zero.policy = TRUE)
+  
+  # Calculate Moran's I
+#  moran_result <- moran.test(residuals, lw_subset, zero.policy = TRUE)
+#  return(moran_result)
+#}
+
+# Calculate Moran's I for each fold in the spatial cross-validation
+#morans_i_results <- list()
+
+#for (i in 1:6) {
+  # Get the indices for this fold
+#  fold_indices <- which(results_df$fold == i)
+  
+  # Calculate residuals
+#  fold_residuals <- results_df$observed[fold_indices] - results_df$predicted[fold_indices]
+  
+  # Calculate Moran's I for this fold
+#  morans_i_results[[i]] <- calculate_morans_i(fold_residuals, fold_indices, lw_all)
+  
+  # Print progress
+#  print(paste("Completed fold", i))
+#}
+
+#save(morans_i_results, file="morans_i_results.Rdata")
+load(here::here("morans_i_results.Rdata"))
+
+# Print results
+#print("Moran's I for each fold in spatial cross-validation:")
+#for (i in 1:5) {
+#  print(paste("Fold", i))
+#  print(morans_i_results[[i]])
+#}
+
+# Extract relevant information from Moran's I results
+morans_table <- data.frame(
+  Fold = 1:6,
+  Moran_I = sapply(morans_i_results, function(x) x$estimate[1]),
+  Expectation = sapply(morans_i_results, function(x) x$estimate[2]),
+  Variance = sapply(morans_i_results, function(x) x$estimate[3]),
+  Std_Deviate = sapply(morans_i_results, function(x) x$statistic),
+  P_Value = sapply(morans_i_results, function(x) x$p.value)
+)
+
+# Format the table
+morans_table_formatted <- morans_table %>%
+  mutate(
+    Moran_I = round(Moran_I, 4),
+    Expectation = format(Expectation, scientific = TRUE, digits = 4),
+    Variance = format(Variance, scientific = TRUE, digits = 4),
+    Std_Deviate = round(Std_Deviate, 2),
+    P_Value = ifelse(P_Value < 2.2e-16, "< 2.2e-16", 
+                     format(P_Value, scientific = TRUE, digits = 4))
+  )
+
+# Create and print the table using kable and kable_styling
+kable(morans_table_formatted,
+                            col.names = c("Fold", "Moran's I", "Expectation", "Variance", "Std. Deviate", "p-value"),
+                            caption = "Moran's I Results for Each Fold in Spatial Cross-Validation",
+                            align = c('c', 'r', 'r', 'r', 'r', 'r'),
+                            format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:6, width = "150px")
 ```
