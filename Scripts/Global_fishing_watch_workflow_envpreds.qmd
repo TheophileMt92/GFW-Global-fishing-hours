@@ -371,6 +371,9 @@ map_data <- combined_data_01deg %>%
   filter(!has_AIS & has_SAR) %>%
   dplyr::select(lon_std, lat_std, predicted_fishing_hours)
 
+#predicted_SAR_only_1RF=map_data
+#save(predicted_SAR_only_1RF, file="predicted_SAR_only_1RF.Rdata")
+
 # Function to create map for a specific region
 create_region_map <- function(data, world_map, lon_col, lat_col, lon_range, lat_range, title, subtitle) {
   ggplot() +
@@ -873,29 +876,29 @@ library(dplyr)
 library(data.table)
 
 # Load the model filenames
-load(here::here("model_filenames.RData"))
+#load(here::here("model_filenames.RData"))
 
 # Function to make predictions using all 6 models
-make_predictions <- function(data) {
-  predictions <- matrix(0, nrow = nrow(data), ncol = 6)
+#make_predictions <- function(data) {
+#  predictions <- matrix(0, nrow = nrow(data), ncol = 6)
   
-  for (i in 1:6) {
-    model <- readRDS(here::here(model_filenames[i]))
-    predictions[, i] <- predict(model, data)
-  }
+#  for (i in 1:6) {
+#    model <- readRDS(here::here(model_filenames[i]))
+#    predictions[, i] <- predict(model, data)
+#  }
   
   # Take the average prediction across all models
-  rowMeans(predictions)
-}
+#  rowMeans(predictions)
+#}
 
 # Prepare the prediction data (same as before)
-prediction_data <- combined_data_with_rasters %>%
-  dplyr::select(total_presence_score, lon_std, lat_std, dist_shore, dist_ports, bathy)
+#prediction_data <- combined_data_with_rasters %>%
+#  dplyr::select(total_presence_score, lon_std, lat_std, dist_shore, dist_ports, bathy)
 
 # Make predictions using the spatially blocked models
-new_predictions <- make_predictions(prediction_data)
+#new_predictions <- make_predictions(prediction_data)
 
-save(new_predictions, file=here::here("new_predictions.Rdata"))
+#save(new_predictions, file=here::here("new_predictions.Rdata"))
 load(here::here("new_predictions.Rdata"))
 
 # Add predictions to the original dataset
@@ -914,6 +917,9 @@ combined_data_01deg <- combined_data_01deg %>%
 map_data <- combined_data_01deg %>%
   filter(!has_AIS & has_SAR) %>%
   dplyr::select(lon_std, lat_std, predicted_fishing_hours)
+
+#predicted_SAR_only_6RF=map_data
+#save(predicted_SAR_only_6RF, file="predicted_SAR_only_6RF.Rdata")
 
 # Use your create_region_map function to create the maps
 # Global map
@@ -1006,4 +1012,150 @@ print(global_map_05deg)
 print(caribbean_map_05deg)
 print(indian_european_map_05deg)
 print(asia_map_05deg)
+```
+
+### Difference maps 
+```{r}
+# Load the data
+load("predicted_SAR_only_6RF.Rdata")
+load("predicted_SAR_only_1RF.Rdata")
+
+# Ensure both datasets have the same rows in the same order
+predicted_SAR_only_6RF <- predicted_SAR_only_6RF %>% arrange(lon_std, lat_std)
+predicted_SAR_only_1RF <- predicted_SAR_only_1RF %>% arrange(lon_std, lat_std)
+
+# Calculate differences
+difference_data <- predicted_SAR_only_6RF %>%
+  mutate(
+    pred_diff = predicted_fishing_hours - predicted_SAR_only_1RF$predicted_fishing_hours,
+    rel_diff = (predicted_fishing_hours - predicted_SAR_only_1RF$predicted_fishing_hours) / 
+               ((predicted_fishing_hours + predicted_SAR_only_1RF$predicted_fishing_hours) / 2)
+  )
+str(difference_data)
+str(predicted_SAR_only_6RF)
+str(predicted_SAR_only_1RF)
+
+# Check for NAs
+print(sum(is.na(difference_data$pred_diff)))
+print(sum(is.na(difference_data$rel_diff)))
+# Create the world map
+world_map <- map_data("world")
+
+# Function to create difference maps for a specific region
+create_difference_map <- function(data, world_map, lon_col, lat_col, lon_range, lat_range, title, subtitle, var, legend_title) {
+  max_abs_value <- max(abs(data[[var]]), na.rm = TRUE)
+  
+  ggplot() +
+    geom_map(data = world_map, map = world_map,
+             aes(long, lat, map_id = region),
+             color = "darkgray", fill = "lightgray", size = 0.1) +
+    geom_tile(data = data, 
+              aes(x = .data[[lon_col]], y = .data[[lat_col]], fill = .data[[var]])) +
+    scale_fill_gradient2(
+      low = "red", mid = "white", high = "blue", 
+      midpoint = 0,
+      limits = c(-max_abs_value, max_abs_value),
+      name = legend_title,
+      guide = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top", title.hjust = 0.5)
+    ) +
+    coord_fixed(1.3, xlim = lon_range, ylim = lat_range) +
+    theme_minimal() +
+    labs(title = title,
+         subtitle = subtitle,
+         x = "Longitude", y = "Latitude") +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.box = "vertical",
+      legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
+      legend.title = element_text(margin = ggplot2::margin(b = 10))
+    )
+}
+
+# Create global difference maps
+abs_diff_global <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(-180, 180), c(-90, 90), 
+  "Absolute Difference in Predicted Fishing Hours", 
+  "6RF Model - 1RF Model (0.1 degree resolution)",
+  "pred_diff",
+  "Difference in Fishing Hours"
+)
+
+rel_diff_global <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(-180, 180), c(-90, 90), 
+  "Relative Difference in Predicted Fishing Hours", 
+  "(6RF Model - 1RF Model) / Average (0.1 degree resolution)",
+  "rel_diff",
+  "Relative Difference"
+)
+
+# Create regional difference maps
+# Caribbean
+abs_diff_caribbean <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(-100, -50), c(0, 40), 
+  "Absolute Difference in Predicted Fishing Hours in the Caribbean", 
+  "6RF Model - 1RF Model (0.1 degree resolution)",
+  "pred_diff",
+  "Difference in Fishing Hours"
+)
+
+rel_diff_caribbean <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(-100, -50), c(0, 40), 
+  "Relative Difference in Predicted Fishing Hours in the Caribbean", 
+  "(6RF Model - 1RF Model) / Average (0.1 degree resolution)",
+  "rel_diff",
+  "Relative Difference"
+)
+
+# Northwestern Indian Ocean to Western European waters
+abs_diff_indian_european <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(-20, 80), c(0, 70), 
+  "Absolute Difference in Predicted Fishing Hours from Northern Indian Ocean to Eastern Atlantic", 
+  "6RF Model - 1RF Model (0.1 degree resolution)",
+  "pred_diff",
+  "Difference in Fishing Hours"
+)
+
+rel_diff_indian_european <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(-20, 80), c(0, 70), 
+  "Relative Difference in Predicted Fishing Hours from Northern Indian Ocean to Eastern Atlantic", 
+  "(6RF Model - 1RF Model) / Average (0.1 degree resolution)",
+  "rel_diff",
+  "Relative Difference"
+)
+
+# Asia
+abs_diff_asia <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(60, 180), c(-20, 60), 
+  "Absolute Difference in Predicted Fishing Hours in Asia", 
+  "6RF Model - 1RF Model (0.1 degree resolution)",
+  "pred_diff",
+  "Difference in Fishing Hours"
+)
+
+rel_diff_asia <- create_difference_map(
+  difference_data, world_map, "lon_std", "lat_std", 
+  c(60, 180), c(-20, 60), 
+  "Relative Difference in Predicted Fishing Hours in Asia", 
+  "(6RF Model - 1RF Model) / Average (0.1 degree resolution)",
+  "rel_diff",
+  "Relative Difference"
+)
+
+# Display the maps
+print(abs_diff_global)
+print(rel_diff_global)
+print(abs_diff_caribbean)
+print(rel_diff_caribbean)
+print(abs_diff_indian_european)
+print(rel_diff_indian_european)
+print(abs_diff_asia)
+print(rel_diff_asia)
 ```
