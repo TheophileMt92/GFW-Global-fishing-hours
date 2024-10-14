@@ -25,10 +25,11 @@ params:
 ```{r}
 # Load required libraries
 library(tidyverse)
-library(maps)
+library(tidyr)
 library(ggplot2)
 library(data.table)
 library(gridExtra)
+library(maps)
 library(raster)
 library(sf)
 library(viridis)
@@ -43,6 +44,7 @@ library(future)
 library(spdep)
 library(ncf)
 library(blockCV)
+library(parallel)
 library(doParallel)
 library(sp)
 ```
@@ -325,8 +327,9 @@ training_data <- combined_data_with_rasters %>%
   dplyr::select(total_fishing_hours, total_presence_score, lon_std, lat_std, dist_shore, dist_ports, bathy) %>%
   na.omit()
 
+#save(training_data, file=here::here("training_data.Rdata"))
 # Train the random forest model with timing
-set.seed(123)  # for reproducibility
+#set.seed(123)  # for reproducibility
 #rf_timing <- system.time({
 #  rf_model_env <- randomForest(
 #    total_fishing_hours ~ total_presence_score + lon_std + lat_std + dist_shore + dist_ports + bathy,
@@ -341,6 +344,281 @@ set.seed(123)  # for reproducibility
 # Save the new model
 #save(rf_model_env, file = "rf_model_01deg_with_rasters.Rdata")
 load(here::here("rf_model_01deg_with_rasters.Rdata"))
+```
+
+### Comparison of transformations in models 
+```{r}
+# Prepare the data
+load(here::here("training_data.Rdata"))
+
+#training_data_log <- training_data %>%
+#  mutate(
+#    log_total_presence_score = log10(total_presence_score + 1),
+#    log_total_fishing_hours = log10(total_fishing_hours + 1)
+#  )
+
+# Function to run a single model
+#run_model <- function(formula, data) {
+#  randomForest(
+#    formula,
+#    data = data,
+#    ntree = 500,
+#    importance = TRUE
+#  )
+#}
+
+# Set up parallel processing
+#num_cores <- detectCores() - 1  # Use all but one core
+#cl <- makeCluster(num_cores)
+
+# Export necessary objects to the cluster
+#clusterExport(cl, c("training_data_log", "run_model"))
+
+# Load required packages on each cluster
+#clusterEvalQ(cl, library(randomForest))
+
+# Define the models
+#models <- list(
+#  no_transform = as.formula(total_fishing_hours ~ total_presence_score + lon_std + lat_std + dist_shore + #dist_ports + bathy),
+#  original = as.formula(total_fishing_hours ~ log_total_presence_score + lon_std + lat_std + dist_shore + #dist_ports + bathy),
+#  log = as.formula(log_total_fishing_hours ~ log_total_presence_score + lon_std + lat_std + dist_shore + #dist_ports + bathy)
+#)
+
+# Run models in parallel
+#results <- parLapply(cl, models, function(formula) run_model(formula, training_data_log))
+
+# Stop the cluster
+#stopCluster(cl)
+
+# Save the models
+#rf_model_no_transform <- results[[1]]
+#rf_model_original <- results[[2]]
+#rf_model_log <- results[[3]]
+
+# Save models to files
+#saveRDS(rf_model_no_transform, "rf_model_no_transform.rds")
+#saveRDS(rf_model_original, "rf_model_original.rds")
+#saveRDS(rf_model_log, "rf_model_log.rds")
+
+# Add the new model with only total_fishing_hours log-transformed
+#rf_model_fishing_log <- randomForest(
+#  log_total_fishing_hours ~ total_presence_score + lon_std + lat_std + dist_shore + dist_ports + bathy,
+#  data = training_data_log,
+#  ntree = 500,
+#  importance = TRUE
+#)
+
+# Save the new model
+#saveRDS(rf_model_fishing_log, "rf_model_fishing_log.rds")
+
+# Load the saved models
+rf_model_no_transform <- readRDS(here::here("rf_model_no_transform.rds"))
+rf_model_original <- readRDS(here::here("rf_model_original.rds"))
+rf_model_log <- readRDS(here::here("rf_model_log.rds"))
+rf_model_fishing_log <- readRDS(here::here("rf_model_fishing_log.rds"))
+
+# Function to evaluate models
+evaluate_model <- function(model, data, log_target = FALSE) {
+  predictions <- predict(model, newdata = data)
+  if (log_target) {
+    predictions <- 10^predictions - 1
+  }
+  
+  actual <- data$total_fishing_hours
+  
+  # Basic Error Metrics
+  mae <- mean(abs(actual - predictions), na.rm = TRUE)
+  rmse <- sqrt(mean((actual - predictions)^2, na.rm = TRUE))
+  mape <- mean(abs((actual - predictions) / actual) * 100, na.rm = TRUE)
+  medae <- median(abs(actual - predictions), na.rm = TRUE)
+  
+  # R-squared (matching randomForest's % Var explained)
+  r_squared <- model$rsq[length(model$rsq)]
+  
+  # Adjusted R-squared
+  n <- length(actual)
+  p <- length(model$forest$independent.variable.names) # Number of predictors
+  adj_r_squared <- 1 - ((1 - r_squared) * (n - 1) / (n - p - 1))
+  
+  # Residual Analysis
+  residuals <- actual - predictions
+  mean_residual <- mean(residuals, na.rm = TRUE)
+  sd_residual <- sd(residuals, na.rm = TRUE)
+  
+  # Feature Importance (for Random Forest)
+  feature_importance <- importance(model)
+  
+  return(list(
+    "Mean Absolute Error" = mae,
+    "Root Mean Squared Error" = rmse,
+    "Mean Absolute Percentage Error" = mape,
+    "Median Absolute Error" = medae,
+    "R-Squared" = r_squared,
+    "Adjusted R-Squared" = adj_r_squared,
+    "Mean of Residuals" = mean_residual,
+    "Standard Deviation of Residuals" = sd_residual,
+    "Feature Importance" = feature_importance
+  ))
+}
+
+# Evaluate all models
+validation_data <- combined_data_with_rasters %>%
+  mutate(
+    data_category = case_when(
+      has_AIS & has_SAR ~ "Both AIS and SAR",
+      has_AIS & !has_SAR ~ "Only AIS",
+      !has_AIS & has_SAR ~ "Only SAR",
+      TRUE ~ "No fishing detected"
+    )
+  )
+
+validation_data <- validation_data %>% filter(data_category == "Both AIS and SAR")
+
+# Evaluate all models
+results_no_transform <- evaluate_model(rf_model_no_transform, validation_data)
+
+validation_data_logpres <- validation_data %>%
+  mutate(log_total_presence_score = log10(total_presence_score + 1))
+
+results_original <- evaluate_model(rf_model_original, validation_data_logpres)
+
+# Add evaluation for the new model (fishing hours log-transformed)
+results_fishing_log <- evaluate_model(rf_model_fishing_log, validation_data, log_target = TRUE)
+
+results_log <- evaluate_model(rf_model_log, validation_data_logpres, log_target = TRUE)
+
+# Create a data frame with the results
+results_df <- data.frame(
+  Metric = c("Mean Absolute Error", "Root Mean Squared Error", "Mean Absolute Percentage Error", "Median Absolute Error", "R-Squared", "Adjusted R-Squared", "Mean of Residuals", "Standard Deviation of Residuals"),
+  No_Transform = c(results_no_transform$`Mean Absolute Error`, results_no_transform$`Root Mean Squared Error`, results_no_transform$`Mean Absolute Percentage Error`, results_no_transform$`Median Absolute Error`, results_no_transform$`R-Squared`, results_no_transform$`Adjusted R-Squared`, results_no_transform$`Mean of Residuals`, results_no_transform$`Standard Deviation of Residuals`),
+  Fishing_Log = c(results_fishing_log$`Mean Absolute Error`, results_fishing_log$`Root Mean Squared Error`, results_fishing_log$`Mean Absolute Percentage Error`, results_fishing_log$`Median Absolute Error`, results_fishing_log$`R-Squared`, results_fishing_log$`Adjusted R-Squared`, results_fishing_log$`Mean of Residuals`, results_fishing_log$`Standard Deviation of Residuals`),
+  Presence_Log = c(results_original$`Mean Absolute Error`, results_original$`Root Mean Squared Error`, results_original$`Mean Absolute Percentage Error`, results_original$`Median Absolute Error`, results_original$`R-Squared`, results_original$`Adjusted R-Squared`, results_original$`Mean of Residuals`, results_original$`Standard Deviation of Residuals`),
+  Both_Log = c(results_log$`Mean Absolute Error`, results_log$`Root Mean Squared Error`, results_log$`Mean Absolute Percentage Error`, results_log$`Median Absolute Error`, results_log$`R-Squared`, results_log$`Adjusted R-Squared`, results_log$`Mean of Residuals`, results_log$`Standard Deviation of Residuals`)
+)
+
+# Create the kable
+kable(results_df, format = "html", digits = 3,
+      col.names = c("Metric", "No Transform", "Fishing Hours Log", "Presence Score Log", "Both Log"),
+      caption = "Model Performance Comparison") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE) %>%
+  add_header_above(c(" " = 1, "Models" = 4)) %>%
+  column_spec(1, bold = TRUE)
+```
+
+#### Interpretation of model comparison metrics 
+Based on the provided performance metrics, I would choose the Fishing Hours Log-Transformed Model. Here's the reasoning:
+
+1. R-Squared and Adjusted R-Squared: The Fishing Hours Log model has the highest R-squared (0.8239) and Adjusted R-squared values, indicating it explains the most variance in the data.
+2. Mean Absolute Percentage Error (MAPE): This model has a significantly lower MAPE (69.71%) compared to the No Transform and Presence Log models (both over 1200%). This suggests much better relative accuracy.
+Median Absolute Error: It has the lowest median absolute error (10.19), which indicates good performance on typical cases.
+3. Root Mean Squared Error (RMSE): While higher than the No Transform model, the difference isn't as dramatic as the improvement in MAPE.
+4. Mean Absolute Error (MAE): Although higher than No Transform and Presence Log models, this should be considered in context with other metrics.
+
+The Both Log model performs very similarly to the Fishing Hours Log model, but the latter edges it out slightly in most metrics.
+
+The No Transform and Presence Log models, despite having lower MAE and RMSE, have extremely high MAPE values, suggesting they might be making large relative errors, especially on smaller values.
+
+The logarithmic transformation of fishing hours seems to have addressed some issues with the data distribution, leading to more balanced performance across different scales of the target variable.
+
+In conclusion, the Fishing Hours Log-Transformed Model appears to offer the best overall performance, particularly in terms of explained variance and relative error metrics. However, the choice might depend on the specific requirements of your application, such as whether absolute or relative errors are more important in your context.
+
+### Selected Model performance
+```{r}
+evaluate_model <- function(model, data, log_target = FALSE) {
+  predictions <- predict(model, newdata = data)
+  if (log_target) {
+    predictions <- 10^predictions - 1
+  }
+  
+  actual <- data$total_fishing_hours
+  
+  # Basic Error Metrics
+  mae <- mean(abs(actual - predictions), na.rm = TRUE)
+  rmse <- sqrt(mean((actual - predictions)^2, na.rm = TRUE))
+  mape <- mean(abs((actual - predictions) / actual) * 100, na.rm = TRUE)
+  medae <- median(abs(actual - predictions), na.rm = TRUE)
+  
+  # R-squared (matching randomForest's % Var explained)
+  r_squared <- model$rsq[length(model$rsq)]
+  
+  # Adjusted R-squared
+  n <- length(actual)
+  p <- length(model$forest$independent.variable.names) # Number of predictors
+  adj_r_squared <- 1 - ((1 - r_squared) * (n - 1) / (n - p - 1))
+  
+  # Residual Analysis
+  residuals <- actual - predictions
+  mean_residual <- mean(residuals, na.rm = TRUE)
+  sd_residual <- sd(residuals, na.rm = TRUE)
+  
+  # Feature Importance (for Random Forest)
+  feature_importance <- importance(model)
+  
+  return(list(
+    "Mean Absolute Error" = mae,
+    "Root Mean Squared Error" = rmse,
+    "Mean Absolute Percentage Error" = mape,
+    "Median Absolute Error" = medae,
+    "R-Squared" = r_squared,
+    "Adjusted R-Squared" = adj_r_squared,
+    "Mean of Residuals" = mean_residual,
+    "Standard Deviation of Residuals" = sd_residual,
+    "Feature Importance" = feature_importance
+  ))
+}
+
+validation_data <- combined_data_with_rasters %>%
+  mutate(
+    data_category = case_when(
+      has_AIS & has_SAR ~ "Both AIS and SAR",
+      has_AIS & !has_SAR ~ "Only AIS",
+      !has_AIS & has_SAR ~ "Only SAR",
+      TRUE ~ "No fishing detected"
+    )
+  )
+
+# Evaluate all models
+validation_data <- validation_data %>% filter(data_category == "Both AIS and SAR")
+results_rf_env <- evaluate_model(rf_model_env, validation_data)
+
+# Create a dataframe for the table
+results_table <- data.frame(
+  Metric = c("Mean Absolute Error", "Root Mean Squared Error", "Mean Absolute Percentage Error",
+             "Median Absolute Error", "R-Squared", "Adjusted R-Squared",
+             "Mean of Residuals", "Standard Deviation of Residuals"),
+  Value = round(c(results_rf_env$`Mean Absolute Error`,
+                  results_rf_env$`Root Mean Squared Error`,
+                  results_rf_env$`Mean Absolute Percentage Error`,
+                  results_rf_env$`Median Absolute Error`,
+                  results_rf_env$`R-Squared`,
+                  results_rf_env$`Adjusted R-Squared`,
+                  results_rf_env$`Mean of Residuals`,
+                  results_rf_env$`Standard Deviation of Residuals`),
+                2)  # Round to 2 decimal places
+)
+
+# Create and display the table
+kable(results_table, format = "html", digits = 4, caption = "Model Evaluation Metrics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center")
+
+# For feature importance, create a separate table
+feature_importance <- as.data.frame(results_rf_env$`Feature Importance`)
+feature_importance$Feature <- rownames(feature_importance)
+feature_importance <- feature_importance[, c("Feature", "%IncMSE", "IncNodePurity")]
+colnames(feature_importance) <- c("Feature", "%IncMSE", "IncNodePurity")
+
+# Sort the feature importance table by %IncMSE in descending order
+feature_importance <- feature_importance[order(-feature_importance$`%IncMSE`), ]
+
+kable(feature_importance, format = "html", digits = 4, 
+      col.names = c("Feature", "%IncMSE", "IncNodePurity"),
+      caption = "Feature Importance") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:3, width = "150px")
 ```
 
 ### Maps of predictions 
@@ -470,7 +748,7 @@ aggregated_data <- combined_data_05deg %>%
     .groups = 'drop'
   )
 
-save(aggregated_data, file=here::here("Predicted_Fishing_Hours_05Deg.Rdata"))
+#save(aggregated_data, file=here::here("Predicted_Fishing_Hours_05Deg.Rdata"))
 
 # Create the map
 predicted_plot_05deg <- ggplot() +
@@ -518,105 +796,6 @@ print(caribbean_map)
 print(indian_european_map)
 print(asia_map)
 ```
-
-### Model performance
-```{r}
-evaluate_model <- function(model, data, log_target = FALSE) {
-  predictions <- predict(model, newdata = data)
-  if (log_target) {
-    predictions <- 10^predictions - 1
-  }
-  
-  actual <- data$total_fishing_hours
-  
-  # Basic Error Metrics
-  mae <- mean(abs(actual - predictions), na.rm = TRUE)
-  rmse <- sqrt(mean((actual - predictions)^2, na.rm = TRUE))
-  mape <- mean(abs((actual - predictions) / actual) * 100, na.rm = TRUE)
-  medae <- median(abs(actual - predictions), na.rm = TRUE)
-  
-  # R-squared (matching randomForest's % Var explained)
-  r_squared <- model$rsq[length(model$rsq)]
-  
-  # Adjusted R-squared
-  n <- length(actual)
-  p <- length(model$forest$independent.variable.names) # Number of predictors
-  adj_r_squared <- 1 - ((1 - r_squared) * (n - 1) / (n - p - 1))
-  
-  # Residual Analysis
-  residuals <- actual - predictions
-  mean_residual <- mean(residuals, na.rm = TRUE)
-  sd_residual <- sd(residuals, na.rm = TRUE)
-  
-  # Feature Importance (for Random Forest)
-  feature_importance <- importance(model)
-  
-  return(list(
-    "Mean Absolute Error" = mae,
-    "Root Mean Squared Error" = rmse,
-    "Mean Absolute Percentage Error" = mape,
-    "Median Absolute Error" = medae,
-    "R-Squared" = r_squared,
-    "Adjusted R-Squared" = adj_r_squared,
-    "Mean of Residuals" = mean_residual,
-    "Standard Deviation of Residuals" = sd_residual,
-    "Feature Importance" = feature_importance
-  ))
-}
-
-validation_data <- combined_data_with_rasters %>%
-  mutate(
-    data_category = case_when(
-      has_AIS & has_SAR ~ "Both AIS and SAR",
-      has_AIS & !has_SAR ~ "Only AIS",
-      !has_AIS & has_SAR ~ "Only SAR",
-      TRUE ~ "No fishing detected"
-    )
-  )
-
-# Evaluate all models
-validation_data <- validation_data %>% filter(data_category == "Both AIS and SAR")
-results_rf_env <- evaluate_model(rf_model_env, validation_data)
-
-# Create a dataframe for the table
-results_table <- data.frame(
-  Metric = c("Mean Absolute Error", "Root Mean Squared Error", "Mean Absolute Percentage Error",
-             "Median Absolute Error", "R-Squared", "Adjusted R-Squared",
-             "Mean of Residuals", "Standard Deviation of Residuals"),
-  Value = round(c(results_rf_env$`Mean Absolute Error`,
-                  results_rf_env$`Root Mean Squared Error`,
-                  results_rf_env$`Mean Absolute Percentage Error`,
-                  results_rf_env$`Median Absolute Error`,
-                  results_rf_env$`R-Squared`,
-                  results_rf_env$`Adjusted R-Squared`,
-                  results_rf_env$`Mean of Residuals`,
-                  results_rf_env$`Standard Deviation of Residuals`),
-                2)  # Round to 2 decimal places
-)
-
-# Create and display the table
-kable(results_table, format = "html", digits = 4, caption = "Model Evaluation Metrics") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                full_width = FALSE, position = "center")
-
-# For feature importance, create a separate table
-feature_importance <- as.data.frame(results_rf_env$`Feature Importance`)
-feature_importance$Feature <- rownames(feature_importance)
-feature_importance <- feature_importance[, c("Feature", "%IncMSE", "IncNodePurity")]
-colnames(feature_importance) <- c("Feature", "%IncMSE", "IncNodePurity")
-
-# Sort the feature importance table by %IncMSE in descending order
-feature_importance <- feature_importance[order(-feature_importance$`%IncMSE`), ]
-
-kable(feature_importance, format = "html", digits = 4, 
-      col.names = c("Feature", "%IncMSE", "IncNodePurity"),
-      caption = "Feature Importance") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                full_width = FALSE, position = "center") %>%
-  column_spec(1, bold = TRUE) %>%
-  column_spec(2:3, width = "150px")
-```
-
 
 ### Test for spatial auto-correlation 
 ```{r}
@@ -695,7 +874,7 @@ moran_test <- moran.test(test_data_sf$residuals, lw)
 
 ### Spatial cross-validation 
 ```{r}
-
+load(here::here("training_data.Rdata"))
 # Assuming your training_data has lon_std (longitude) and lat_std (latitude) columns
 coords <- SpatialPoints(training_data[, c("lon_std", "lat_std")])
 
@@ -1014,12 +1193,59 @@ print(indian_european_map_05deg)
 print(asia_map_05deg)
 ```
 
-### Difference maps 
+### Differences among predictions 
 ```{r}
 # Load the data
 load("predicted_SAR_only_6RF.Rdata")
 load("predicted_SAR_only_1RF.Rdata")
 
+# Prepare the data (assuming you've already loaded and arranged it)
+combined_data <- bind_rows(
+  predicted_SAR_only_6RF %>% 
+    dplyr::select(predicted_fishing_hours) %>% 
+    mutate(method = "6RF"),
+  predicted_SAR_only_1RF %>% 
+    dplyr::select(predicted_fishing_hours) %>% 
+    mutate(method = "1RF")
+)
+
+# 1. Log-transformed density plot
+log_density_plot <- ggplot(combined_data, aes(x = predicted_fishing_hours + 1, fill = method)) +
+  geom_density(alpha = 0.5) +
+  scale_x_log10(labels = scales::comma) +
+  scale_fill_manual(values = c("6RF" = "blue", "1RF" = "red")) +
+  labs(title = "Distribution of Predicted Fishing Hours (Log Scale)",
+       x = "Predicted Fishing Hours (Log Scale)",
+       y = "Density",
+       fill = "Method") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(log_density_plot)
+
+# Summary statistics
+summary_stats <- combined_data %>%
+  group_by(method) %>%
+  summarise(
+    mean = mean(predicted_fishing_hours, na.rm = TRUE),
+    median = median(predicted_fishing_hours, na.rm = TRUE),
+    sd = sd(predicted_fishing_hours, na.rm = TRUE),
+    min = min(predicted_fishing_hours, na.rm = TRUE),
+    max = max(predicted_fishing_hours, na.rm = TRUE),
+    q1 = quantile(predicted_fishing_hours, 0.25, na.rm = TRUE),
+    q3 = quantile(predicted_fishing_hours, 0.75, na.rm = TRUE)
+  )
+
+kable(summary_stats, format = "html", digits = 2,
+      col.names = c("Method", "Mean", "Median", "SD", "Min", "Max", "Q1", "Q3"),
+      caption = "Summary Statistics of Predicted Fishing Hours by Method") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE) %>%
+  add_header_above(c(" " = 1, "Statistics" = 7)) %>%
+  column_spec(1, bold = TRUE)
+```
+
+```{r}
 # Ensure both datasets have the same rows in the same order
 predicted_SAR_only_6RF <- predicted_SAR_only_6RF %>% arrange(lon_std, lat_std)
 predicted_SAR_only_1RF <- predicted_SAR_only_1RF %>% arrange(lon_std, lat_std)
@@ -1030,14 +1256,14 @@ difference_data <- predicted_SAR_only_6RF %>%
     pred_diff = predicted_fishing_hours - predicted_SAR_only_1RF$predicted_fishing_hours,
     rel_diff = (predicted_fishing_hours - predicted_SAR_only_1RF$predicted_fishing_hours) / 
                ((predicted_fishing_hours + predicted_SAR_only_1RF$predicted_fishing_hours) / 2)
-  )
-str(difference_data)
-str(predicted_SAR_only_6RF)
-str(predicted_SAR_only_1RF)
+  ) %>%
+  na.omit()
 
+#summary(difference_data)
 # Check for NAs
-print(sum(is.na(difference_data$pred_diff)))
-print(sum(is.na(difference_data$rel_diff)))
+#print(sum(is.na(difference_data$pred_diff)))
+#print(sum(is.na(difference_data$rel_diff)))
+
 # Create the world map
 world_map <- map_data("world")
 
@@ -1096,7 +1322,7 @@ rel_diff_global <- create_difference_map(
 abs_diff_caribbean <- create_difference_map(
   difference_data, world_map, "lon_std", "lat_std", 
   c(-100, -50), c(0, 40), 
-  "Absolute Difference in Predicted Fishing Hours in the Caribbean", 
+  "Absolute Difference in Predicted Fishing Hours \nin the Caribbean", 
   "6RF Model - 1RF Model (0.1 degree resolution)",
   "pred_diff",
   "Difference in Fishing Hours"
@@ -1105,7 +1331,7 @@ abs_diff_caribbean <- create_difference_map(
 rel_diff_caribbean <- create_difference_map(
   difference_data, world_map, "lon_std", "lat_std", 
   c(-100, -50), c(0, 40), 
-  "Relative Difference in Predicted Fishing Hours in the Caribbean", 
+  "Relative Difference in Predicted Fishing Hours \nin the Caribbean", 
   "(6RF Model - 1RF Model) / Average (0.1 degree resolution)",
   "rel_diff",
   "Relative Difference"
@@ -1115,7 +1341,7 @@ rel_diff_caribbean <- create_difference_map(
 abs_diff_indian_european <- create_difference_map(
   difference_data, world_map, "lon_std", "lat_std", 
   c(-20, 80), c(0, 70), 
-  "Absolute Difference in Predicted Fishing Hours from Northern Indian Ocean to Eastern Atlantic", 
+  "Absolute Difference in Predicted Fishing Hours from \nNorthern Indian Ocean to Eastern Atlantic", 
   "6RF Model - 1RF Model (0.1 degree resolution)",
   "pred_diff",
   "Difference in Fishing Hours"
@@ -1124,7 +1350,7 @@ abs_diff_indian_european <- create_difference_map(
 rel_diff_indian_european <- create_difference_map(
   difference_data, world_map, "lon_std", "lat_std", 
   c(-20, 80), c(0, 70), 
-  "Relative Difference in Predicted Fishing Hours from Northern Indian Ocean to Eastern Atlantic", 
+  "Relative Difference in Predicted Fishing Hours from \nNorthern Indian Ocean to Eastern Atlantic", 
   "(6RF Model - 1RF Model) / Average (0.1 degree resolution)",
   "rel_diff",
   "Relative Difference"
@@ -1150,12 +1376,12 @@ rel_diff_asia <- create_difference_map(
 )
 
 # Display the maps
-print(abs_diff_global)
+#print(abs_diff_global)
 print(rel_diff_global)
-print(abs_diff_caribbean)
+#print(abs_diff_caribbean)
 print(rel_diff_caribbean)
-print(abs_diff_indian_european)
+#print(abs_diff_indian_european)
 print(rel_diff_indian_european)
-print(abs_diff_asia)
+#print(abs_diff_asia)
 print(rel_diff_asia)
 ```
