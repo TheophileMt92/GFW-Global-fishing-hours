@@ -14,6 +14,7 @@ format:
 editor: visual
 execute:
   warning: false
+  error: false
 params:
   printlabels: TRUE
 ---
@@ -98,8 +99,8 @@ AIS_data_std <- aggregated_AIS_fishing %>%
 # Create the world map
 world_map <- map_data("world")
 
-# Create the plot
-ggplot() +
+# Assign plot to variable
+AIS_data_plot <- ggplot() +
   geom_map(data = world_map, map = world_map,
            aes(long = long, lat = lat, map_id = region),
            color = "black", fill = "lightgray", size = 0.1) +
@@ -125,6 +126,13 @@ ggplot() +
     legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
     legend.title = element_text(margin = ggplot2::margin(b = 10))
   )
+print(AIS_data_plot)
+# Save the plot
+ggsave(here::here("Outputs","AIS_fishing_map.png"), 
+       plot = AIS_data_plot,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
 ```
 
 ## Sentinel-1 SAR data
@@ -175,8 +183,8 @@ SAR_data_std <- aggregated_SAR_fishing %>%
 # Create the world map
 world_map <- map_data("world")
 
-# Create the plot
-ggplot() +
+# Assign plot to variable
+SAR_data_plot <- ggplot() +
   geom_map(data = world_map, map = world_map,
            aes(long = long, lat = lat, map_id = region),
            color = "black", fill = "lightgray", size = 0.1) +
@@ -202,6 +210,14 @@ ggplot() +
     legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
     legend.title = element_text(margin = ggplot2::margin(b = 10))
   )
+print(SAR_data_plot)
+
+# Save the plot
+ggsave(here::here("Outputs", "SAR_fishing_map.png"), 
+       plot = SAR_data_plot,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
 ```
 
 ## Compare AIS, and SAR detection locations
@@ -317,7 +333,7 @@ raster_df <- unique(raster_df, by = c("lon_std", "lat_std"))
 setDT(raster_df)
 
 # Now proceed with the join and model training
-load(here::here("data","combined_data_O1deg.Rdata"))
+load(here::here("Data","combined_data_O1deg.Rdata"))
 
 # Keep the first occurrence of each coordinate pair (because there are duplicates)
 combined_data_01deg <- unique(combined_data_01deg, by = c("lon_std", "lat_std"))
@@ -512,10 +528,10 @@ training_data <- combined_data_with_rasters %>%
 #saveRDS(rf_model_fishing_log, "rf_model_fishing_log.rds")
 
 # Load the saved models
-rf_model_no_transform <- readRDS(here::here("rf_model_no_transform.rds"))
-rf_model_original <- readRDS(here::here("rf_model_original.rds"))
-rf_model_log <- readRDS(here::here("rf_model_log.rds"))
-rf_model_fishing_log <- readRDS(here::here("rf_model_fishing_log.rds"))
+rf_model_no_transform <- readRDS(here::here("Outputs", "rf_model_no_transform.rds"))
+rf_model_original <- readRDS(here::here("Outputs", "rf_model_original.rds"))
+rf_model_log <- readRDS(here::here("Outputs", "rf_model_log.rds"))
+rf_model_fishing_log <- readRDS(here::here("Outputs", "rf_model_fishing_log.rds"))
 
 # Function to evaluate models
 evaluate_model <- function(model, data, log_target = FALSE) {
@@ -681,7 +697,7 @@ validation_data <- combined_data_with_rasters %>%
   )
 
 # Evaluate the model
-rf_model_fishing_log <- readRDS(here::here("rf_model_fishing_log.rds"))
+rf_model_fishing_log <- readRDS(here::here("Outputs","rf_model_fishing_log.rds"))
 validation_data <- validation_data %>% filter(data_category == "Both AIS and SAR")
 results_rf_fishing_log <- evaluate_model(rf_model_fishing_log, validation_data, log_target = TRUE)
 
@@ -872,6 +888,13 @@ predicted_plot <- ggplot() +
   )
 
 print(predicted_plot)
+
+# Save the plot
+ggsave(here::here("Outputs", "predicted_plot_SAR_only.png"), 
+       plot = predicted_plot,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
 #Aggregate data to 0.5 degree resolution 
 # First, round the coordinates to the nearest 0.5 degree
 combined_data_05deg <- combined_data_01deg %>%
@@ -972,7 +995,7 @@ test_data <- data[-train_indices, ]
 # Load the saved model
 #load(here::here("rf_model_fishing_log_train.Rdata"))
 
-rf_model_fishing_log <- readRDS(here::here("rf_model_fishing_log.rds"))
+rf_model_fishing_log <- readRDS(here::here("Outputs","rf_model_fishing_log.rds"))
 
 # Make predictions on the test set
 test_data$log_predictions <- predict(rf_model_fishing_log, test_data)
@@ -1023,8 +1046,8 @@ moran_test <- moran.test(test_data_sf$residuals, lw)
 ### Spatial cross-validation 
 ```{r}
 # Load the training data and the model
-load(here::here("training_data.Rdata"))
-rf_model_fishing_log <- readRDS(here::here("rf_model_fishing_log.rds"))
+load(here::here("Outputs","training_data.Rdata"))
+rf_model_fishing_log <- readRDS(here::here("Outputs","rf_model_fishing_log.rds"))
 
 # Convert training_data to sf object if it's not already
 if (!inherits(training_data, "sf")) {
@@ -1233,7 +1256,7 @@ test_data <- training_data_05deg[-sample_index, ]
 
 # Now, save the model as an RDS file
 #saveRDS(rf_model_env, file = "rf_model_env_global_nodata.rds")
-rf_model_env <- readRDS("rf_model_env_global_nodata.rds")
+rf_model_env <- readRDS(here::here("Outputs","rf_model_env_global_nodata.rds"))
 ```
 
 ### Model performance
@@ -1353,7 +1376,7 @@ prediction_data_env <- raster_df %>%
   na.omit()
 
 # Load the random forest model
-rf_model_env <- readRDS("rf_model_env_global_nodata.rds")
+rf_model_env <- readRDS(here::here("Outputs","rf_model_env_global_nodata.rds"))
 
 # Make predictions using the model
 log_predictions_env <- predict(rf_model_env, newdata = prediction_data_env)
@@ -1375,6 +1398,13 @@ global_map <- create_region_map(
   title = "Global Fishing Hours",
   subtitle = "0.5 degree resolution, based on AIS data, SAR data and Random Forest predictions using environmental data"
 )
+
+# Save the plot
+ggsave(here::here("Outputs", "Global_fishing_map.png"), 
+       plot = global_map,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
 
 # Regional maps
 caribbean_map <- create_region_map(
@@ -1480,7 +1510,7 @@ evaluate_model <- function(model, data, log_target = FALSE, log_column = "log_fi
 }
 
 # Evaluate the model on the test set
-rf_model_env_mpa <- readRDS(here::here("rf_model_env_mpa_global.rds"))
+rf_model_env_mpa <- readRDS(here::here("Outputs","rf_model_env_mpa_global.rds"))
 results_rf_fishing_log <- evaluate_model(rf_model_env_mpa, test_data, log_target = TRUE)
 
 # Create a dataframe for the metrics table
@@ -1564,7 +1594,7 @@ prediction_data_env <- prediction_data_env %>%
   mutate(mpa_present = ifelse(is.na(mpa_present), 0, mpa_present))
 
 # Load the random forest model that includes MPA as a predictor
-rf_model_env_mpa <- readRDS("rf_model_env_mpa_global.rds")
+rf_model_env_mpa <- readRDS(here::here("Outputs","rf_model_env_mpa_global.rds"))
 
 # Make predictions using the model that includes MPA
 log_predictions_env_mpa <- predict(rf_model_env_mpa, newdata = prediction_data_env)
