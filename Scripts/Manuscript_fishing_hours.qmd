@@ -1,0 +1,963 @@
+---
+title: "Manuscript_fishing_hours"
+author: "Théophile L. Mouton"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-location: right
+    css: custom.css
+    output-file: "Manuscript_fishing_hours.html"
+    self-contained: true
+    code-fold: true
+    code-tools: true
+editor: visual
+execute:
+  warning: false
+  error: false
+params:
+  printlabels: TRUE
+---
+
+## Open R libraries
+
+```{r}
+library(tidyverse)
+library(tidyr)
+library(ggplot2)
+library(data.table)
+library(gridExtra)
+library(maps)
+library(raster)
+library(sf)
+library(viridis)
+library(scales)
+library(dplyr)
+library(randomForest)
+library(caret)
+library(pdp)
+library(knitr)
+library(kableExtra)
+library(future)
+library(spdep)
+library(ncf)
+library(blockCV)
+library(parallel)
+library(doParallel)
+library(sp)
+library(purrr)
+library(kableExtra)
+library(webshot2)
+```
+
+## Open datasets
+
+```{r}
+#AIS data
+load(here::here("Data","AIS_fishing.Rdata"))
+
+#SAR data
+load(here::here("Data","SAR_fishing.Rdata"))
+
+# Open the saved adjusted rasters
+Ports_adjusted <- raster(here::here("Data", "Environmental data layers", "distance-from-port-0.1deg-adjusted.tif"))
+Shore_adjusted <- raster(here::here("Data", "Environmental data layers", "distance-from-shore-0.1deg-adjusted.tif"))
+Bathy_adjusted <- raster(here::here("Data", "Environmental data layers", "bathymetry-0.1deg-adjusted.tif"))
+
+#
+load(here::here("Data","combined_data_O1deg.Rdata"))
+
+# Load the saved RF models
+rf_model_no_transform <- readRDS(here::here("Outputs", "rf_model_no_transform.rds"))
+rf_model_original <- readRDS(here::here("Outputs", "rf_model_original.rds"))
+rf_model_log <- readRDS(here::here("Outputs", "rf_model_log.rds"))
+rf_model_fishing_log <- readRDS(here::here("Outputs", "rf_model_fishing_log.rds"))
+```
+
+## AIS data
+
+Data from Kroodsma et al. (2018) Science, accessible at: [Global Fishing Watch Data Download Portal](https://globalfishingwatch.org/data-download/datasets/public-fishing-effort).
+
+The data is accessible up to the end of the year 2020, we used four entire years of data (2017, 2018, 2019, 2020) to match SAR data records.
+
+```{r}
+# Set the path to the 2017-2020 folder
+
+#path <- "Data/AIS Fishing Effort 2017-2020"
+
+# List all CSV files in the folder
+#AIS_csv_files <- list.files(path = here::here(path), pattern = "*.csv", full.names = TRUE, recursive = TRUE)
+
+# Read all CSV files and combine them into a single data frame
+#AIS_fishing <- AIS_csv_files %>%
+#  map_df(~read_csv(.))
+
+# Aggregate fishing hours by latitude and longitude
+aggregated_AIS_fishing <- AIS_fishing %>%
+  group_by(cell_ll_lat, cell_ll_lon) %>%
+  summarise(total_fishing_hours = sum(fishing_hours, na.rm = TRUE)) %>%
+  ungroup() %>%
+  # Remove any cells with zero or negative fishing hours
+  filter(total_fishing_hours > 0)
+
+# Function to standardize coordinates to 0.1 degree resolution
+standardize_coords <- function(lon, lat) {
+  list(
+    lon_std = floor(lon * 10) / 10,
+    lat_std = floor(lat * 10) / 10
+  )
+}
+
+# Standardize and aggregate AIS data
+AIS_data_std <- aggregated_AIS_fishing %>%
+  mutate(coords = map2(cell_ll_lon, cell_ll_lat, standardize_coords)) %>%
+  mutate(
+    lon_std = map_dbl(coords, ~ .x$lon_std),
+    lat_std = map_dbl(coords, ~ .x$lat_std)
+  ) %>%
+  group_by(lon_std, lat_std) %>%
+  summarise(total_fishing_hours = sum(total_fishing_hours, na.rm = TRUE), .groups = "drop")
+
+# Create the world map
+world_map <- map_data("world")
+
+# Assign plot to variable
+AIS_data_plot <- ggplot() +
+  geom_map(data = world_map, map = world_map,
+           aes(long = long, lat = lat, map_id = region),
+           color = "black", fill = "lightgray", size = 0.1) +
+  geom_tile(data = AIS_data_std, 
+            aes(x = lon_std, y = lat_std, fill = total_fishing_hours)) +
+  scale_fill_viridis(
+    option = "inferno",
+    direction = -1,
+    trans = "log1p",
+    name = "AIS fishing effort (hours; 2017-2020)", 
+    breaks = c(0, 1, 10, 100, 1000, 10000, 100000),
+    labels = scales::comma,
+    guide = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top", title.hjust = 0.5)
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = NULL,
+       x = "Longitude", y = "Latitude") +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
+    legend.title = element_text(margin = ggplot2::margin(b = 10))
+  )
+
+print(AIS_data_plot)
+
+# Save the plot
+ggsave(here::here("Outputs","AIS_fishing_map.png"), 
+       plot = AIS_data_plot,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
+```
+
+## Sentinel-1 SAR data
+
+Data from Paolo et al. 2024 Nature, accessible at: [Global Fishing Watch SAR Vessel Detections](https://globalfishingwatch.org/data-download/datasets/public-sar-vessel-detections:v20231026)
+
+The data is accessible from 2017 to today, we used four entire years of data (2017, 2018, 2019, 2020) to match AIS records.
+
+```{r}
+# Set the path to the 2016 folder
+#path <- "Data/SAR Vessel detections 2017-2020"
+
+# List all CSV files in the folder
+#SAR_csv_files <- list.files(path = here::here(path), pattern = "*.csv", full.names = TRUE)
+
+# Read all CSV files and combine them into a single data frame
+#SAR_fishing <- SAR_csv_files %>%
+#  map_df(~read_csv(.))
+
+# Aggregate fishing hours by latitude and longitude
+aggregated_SAR_fishing <- SAR_fishing %>%
+  mutate(
+    lat_rounded = round(lat, digits = 2),
+    lon_rounded = round(lon, digits = 2)
+  ) %>%
+  group_by(lat_rounded, lon_rounded) %>%
+  filter(fishing_score >= 0.9) %>%
+  summarise(
+    total_presence_score = sum(presence_score, na.rm = TRUE),
+    avg_fishing_score = mean(fishing_score, na.rm = TRUE),
+    count = n()
+  ) %>%
+  mutate(total_presence_score = round(total_presence_score, digits = 0)) %>%
+  ungroup()
+
+# Standardize and aggregate SAR data
+SAR_data_std <- aggregated_SAR_fishing %>%
+  mutate(coords = map2(lon_rounded, lat_rounded, standardize_coords)) %>%
+  mutate(
+    lon_std = map_dbl(coords, ~ .x$lon_std),
+    lat_std = map_dbl(coords, ~ .x$lat_std)
+  ) %>%
+  group_by(lon_std, lat_std) %>%
+  summarise(total_presence_score = sum(total_presence_score, na.rm = TRUE), .groups = "drop")
+
+# Create the world map
+world_map <- map_data("world")
+
+# Assign plot to variable
+SAR_data_plot <- ggplot() +
+  geom_map(data = world_map, map = world_map,
+           aes(long = long, lat = lat, map_id = region),
+           color = "black", fill = "lightgray", size = 0.1) +
+  geom_tile(data = SAR_data_std, 
+            aes(x = lon_std, y = lat_std, fill = total_presence_score)) +
+  scale_fill_viridis(
+    option = "inferno",
+    direction = -1,
+    trans = "log1p",
+    name = "Fishing vessel detections (2017-2020)", 
+    breaks = c(0, 1, 10, 100, 1000, 10000),
+    labels = scales::comma,
+    guide = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top", title.hjust = 0.5)
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = NULL,
+       x = "Longitude", y = "Latitude") +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
+    legend.title = element_text(margin = ggplot2::margin(b = 10))
+  )
+print(SAR_data_plot)
+
+# Save the plot
+ggsave(here::here("Outputs", "SAR_fishing_map.png"), 
+       plot = SAR_data_plot,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
+```
+
+## Compare AIS, and SAR detection locations
+
+Identifying grid cells with only AIS, only SAR detections or both data types.
+
+```{r}
+# Merge the datasets
+combined_data <- full_join(
+  AIS_data_std,
+  SAR_data_std,
+  by = c("lon_std", "lat_std")
+)
+
+# Categorize each cell
+combined_data <- combined_data %>%
+  mutate(category = case_when(
+    total_fishing_hours > 0 & total_presence_score > 0 ~ "Both AIS and SAR",
+    total_fishing_hours > 0 & (is.na(total_presence_score) | total_presence_score == 0) ~ "Only AIS",
+    (is.na(total_fishing_hours) | total_fishing_hours == 0) & total_presence_score > 0 ~ "Only SAR",
+    TRUE ~ "No fishing detected"
+  ))
+
+# Create the world map
+world_map <- map_data("world")
+
+# Create the plot
+world_plot <- ggplot() +
+  geom_map(data = world_map, map = world_map,
+           aes(long = long, lat = lat, map_id = region),
+           color = "black", fill = "lightgray", size = 0.1) +
+  geom_tile(data = combined_data, 
+            aes(x = lon_std, y = lat_std, fill = category)) +
+  scale_fill_manual(
+    values = c("Both AIS and SAR" = "purple", 
+               "Only AIS" = "blue", 
+               "Only SAR" = "red", 
+               "No fishing detected" = "white"),
+    name = "Fishing data source",
+    guide = guide_legend(title.position = "top", title.hjust = 0.5)
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = "Global fishing detection",
+       subtitle = "Comparison of AIS (2017-2020) and SAR (2017-2020) data at 0.1-degree resolution",
+       x = "Longitude", y = "Latitude") +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
+    legend.title = element_text(margin = ggplot2::margin(b = 10))
+  )
+
+# Display the plot
+print(world_plot)
+
+# Save the plot
+ggsave(here::here("Outputs", "AIS_SAR_comparison_map.png"), 
+       plot = world_plot,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
+
+# Get summary statistics
+summary_stats <- combined_data %>% 
+  count(category) %>% 
+  mutate(percentage = n / sum(n) * 100) %>%
+  rename(`Number of cells` = n) %>%
+  mutate(percentage = round(percentage, 2))
+
+# Create the table
+table_output <- kable(summary_stats, 
+      format = "html", 
+      col.names = c("Category", "Number of cells", "Percentage (%)"),
+      caption = "Summary statistics of data categories") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, 
+                position = "center") %>%
+  column_spec(2, width = "150px") %>%
+  column_spec(3, width = "150px")
+
+table_output
+
+# Save as PNG
+save_kable(table_output, file = here::here("Outputs","summary_stats_table.png"))
+```
+
+## Random forest model
+
+Predicting fishing hours in areas with only SAR data at a 0.1 degree resolution. Using a random forest model of \>160,000 associations between SAR vessel detections and AIS fishing hours globally, geographical coordinates, distance to ports, distance to shore and bathymetry.
+
+```{r}
+# Stack the resampled rasters
+raster_stack <- stack(Shore_adjusted, Ports_adjusted, Bathy_adjusted)
+
+# Convert the stack to a dataframe
+raster_df <- as.data.frame(raster_stack, xy = TRUE)
+
+# Rename the columns
+names(raster_df) <- c("x", "y", "dist_shore", "dist_ports", "bathy")
+
+# Remove NA values if desired
+raster_df <- na.omit(raster_df)
+
+# Convert to data.table for efficiency
+setDT(raster_df)
+
+# Round x and y to 1 decimal place for consistency
+raster_df[, `:=`(
+  lon_std = round(x, digits = 1),
+  lat_std = round(y, digits = 1)
+)]
+
+# Keep only ocean areas (negative bathymetry values)
+raster_df <- raster_df[bathy < 0]
+
+# Keep the first occurrence of each coordinate pair (because there are duplicates)
+raster_df <- unique(raster_df, by = c("lon_std", "lat_std"))
+setDT(raster_df)
+
+# Now proceed with the join and model training
+#load(here::here("Data","combined_data_O1deg.Rdata"))
+
+# Keep the first occurrence of each coordinate pair (because there are duplicates)
+combined_data_01deg <- unique(combined_data_01deg, by = c("lon_std", "lat_std"))
+setDT(combined_data_01deg)
+
+# Perform the join using data.table
+combined_data_with_rasters <- raster_df[combined_data_01deg, 
+                                        on = .(lon_std, lat_std), 
+                                        nomatch = 0]
+
+# Convert back to dataframe if needed
+combined_data_with_rasters <- as.data.frame(combined_data_with_rasters)
+
+# Create the new combined dataframe
+combined_data_all <- raster_df[, .(lon_std, lat_std, dist_shore, dist_ports, bathy)]
+
+# Perform the join
+combined_data_all <- merge(combined_data_all, combined_data_01deg, 
+                           by = c("lon_std", "lat_std"), 
+                           all.x = TRUE)
+
+# Fill NA values for has_AIS and has_SAR with FALSE
+combined_data_all[is.na(has_AIS), has_AIS := FALSE]
+combined_data_all[is.na(has_SAR), has_SAR := FALSE]
+
+# Categorize each cell
+combined_data_all <- combined_data_all %>%
+  mutate(category = case_when(
+    has_AIS == TRUE ~ "AIS Data",
+    has_SAR == TRUE ~ "SAR Data Only",
+    TRUE ~ "No AIS or SAR Data"
+  ))
+
+# Create the world map
+world_map <- map_data("world")
+
+# Create the plot
+world_plot <- ggplot() +
+  geom_map(data = world_map, map = world_map,
+           aes(long = long, lat = lat, map_id = region),
+           color = "black", fill = "lightgray", size = 0.1) +
+  geom_tile(data = combined_data_all, 
+            aes(x = lon_std, y = lat_std, fill = category, color = category)) +
+  scale_fill_manual(
+    values = c("AIS Data" = "blue", 
+               "SAR Data Only" = "red", 
+               "No AIS or SAR Data" = "black"),
+    name = "Data Source",
+    guide = guide_legend(title.position = "top", title.hjust = 0.5)
+  ) +
+  scale_color_manual(
+    values = c("AIS Data" = "blue", 
+               "SAR Data Only" = "red", 
+               "No AIS or SAR Data" = "black"),
+    guide = "none"
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = "Global Data Coverage",
+       subtitle = "Distribution of AIS and SAR data at 0.1-degree resolution",
+       x = "Longitude", y = "Latitude") +
+ theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
+    legend.title = element_text(margin = ggplot2::margin(b = 10)),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12)
+  )
+
+# Print the plot
+#print(world_plot)
+
+# Calculate summary statistics
+summary_stats <- combined_data_all[, .(
+  data_type = case_when(
+    has_AIS == TRUE ~ "AIS Data",
+    has_SAR == TRUE ~ "SAR Data Only",
+    TRUE ~ "No AIS or SAR Data"
+  )
+)][, .(
+  num_cells = .N,
+  percentage = .N / nrow(combined_data_all) * 100
+), by = data_type]
+
+# Order the data types
+summary_stats <- summary_stats[order(match(data_type, c("AIS Data", "SAR Data Only", "No AIS or SAR Data")))]
+
+# Add total row
+total_row <- data.table(
+  data_type = "Total",
+  num_cells = sum(summary_stats$num_cells),
+  percentage = 100
+)
+
+summary_stats <- rbindlist(list(summary_stats, total_row))
+
+# Create kable
+kable_output <- summary_stats %>%
+  kable(
+    col.names = c("Data Type", "Number of Cells", "Percentage (%)"),
+    digits = c(0, 0, 2),
+    align = c("l", "r", "r"),
+    caption = "Summary Statistics of Data Types"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(nrow(summary_stats), bold = TRUE, background = "#F0F0F0") %>%
+  footnote(
+    general = "AIS Data category includes cells with both AIS and SAR data.",
+    general_title = "Note:",
+    footnote_as_chunk = TRUE
+  )
+
+# Print the kable
+#kable_output
+
+# Prepare the training data
+training_data <- combined_data_with_rasters %>%
+  filter(has_AIS & has_SAR) %>%
+  dplyr::select(total_fishing_hours, total_presence_score, lon_std, lat_std, dist_shore, dist_ports, bathy) %>%
+  na.omit()
+```
+
+### Comparison of transformations in models 
+```{r}
+# Prepare the data
+#load(here::here("training_data.Rdata"))
+
+#training_data_log <- training_data %>%
+#  mutate(
+#    log_total_presence_score = log10(total_presence_score + 1),
+#    log_total_fishing_hours = log10(total_fishing_hours + 1)
+#  )
+
+# Function to run a single model
+#run_model <- function(formula, data) {
+#  randomForest(
+#    formula,
+#    data = data,
+#    ntree = 500,
+#    importance = TRUE
+#  )
+#}
+
+# Set up parallel processing
+#num_cores <- detectCores() - 1  # Use all but one core
+#cl <- makeCluster(num_cores)
+
+# Export necessary objects to the cluster
+#clusterExport(cl, c("training_data_log", "run_model"))
+
+# Load required packages on each cluster
+#clusterEvalQ(cl, library(randomForest))
+
+# Define the models
+#models <- list(
+#  no_transform = as.formula(total_fishing_hours ~ total_presence_score + lon_std + lat_std + dist_shore + #dist_ports + bathy),
+#  original = as.formula(total_fishing_hours ~ log_total_presence_score + lon_std + lat_std + dist_shore + #dist_ports + bathy),
+#  log = as.formula(log_total_fishing_hours ~ log_total_presence_score + lon_std + lat_std + dist_shore + #dist_ports + bathy)
+#)
+
+# Run models in parallel
+#results <- parLapply(cl, models, function(formula) run_model(formula, training_data_log))
+
+# Stop the cluster
+#stopCluster(cl)
+
+# Save the models
+#rf_model_no_transform <- results[[1]]
+#rf_model_original <- results[[2]]
+#rf_model_log <- results[[3]]
+
+# Save models to files
+#saveRDS(rf_model_no_transform, "rf_model_no_transform.rds")
+#saveRDS(rf_model_original, "rf_model_original.rds")
+#saveRDS(rf_model_log, "rf_model_log.rds")
+
+# Add the new model with only total_fishing_hours log-transformed
+#rf_model_fishing_log <- randomForest(
+#  log_total_fishing_hours ~ total_presence_score + lon_std + lat_std + dist_shore + dist_ports + bathy,
+#  data = training_data_log,
+#  ntree = 500,
+#  importance = TRUE
+#)
+
+# Save the new model
+#saveRDS(rf_model_fishing_log, "rf_model_fishing_log.rds")
+
+# Function to evaluate models
+evaluate_model <- function(model, data, log_target = FALSE) {
+  predictions <- predict(model, newdata = data)
+  if (log_target) {
+    predictions <- 10^predictions - 1
+  }
+  
+  actual <- data$total_fishing_hours
+  
+  # Basic Error Metrics
+  mae <- mean(abs(actual - predictions), na.rm = TRUE)
+  rmse <- sqrt(mean((actual - predictions)^2, na.rm = TRUE))
+  mape <- mean(abs((actual - predictions) / actual) * 100, na.rm = TRUE)
+  medae <- median(abs(actual - predictions), na.rm = TRUE)
+  
+  # R-squared (matching randomForest's % Var explained)
+  r_squared <- model$rsq[length(model$rsq)]
+  
+  # Adjusted R-squared
+  n <- length(actual)
+  p <- length(model$forest$independent.variable.names) # Number of predictors
+  adj_r_squared <- 1 - ((1 - r_squared) * (n - 1) / (n - p - 1))
+  
+  # Residual Analysis
+  residuals <- actual - predictions
+  mean_residual <- mean(residuals, na.rm = TRUE)
+  sd_residual <- sd(residuals, na.rm = TRUE)
+  
+  # Feature Importance (for Random Forest)
+  feature_importance <- importance(model)
+  
+  return(list(
+    "Mean Absolute Error" = mae,
+    "Root Mean Squared Error" = rmse,
+    "Mean Absolute Percentage Error" = mape,
+    "Median Absolute Error" = medae,
+    "R-Squared" = r_squared,
+    "Adjusted R-Squared" = adj_r_squared,
+    "Mean of Residuals" = mean_residual,
+    "Standard Deviation of Residuals" = sd_residual,
+    "Feature Importance" = feature_importance
+  ))
+}
+
+# Evaluate all models
+validation_data <- combined_data_with_rasters %>%
+  mutate(
+    data_category = case_when(
+      has_AIS & has_SAR ~ "Both AIS and SAR",
+      has_AIS & !has_SAR ~ "Only AIS",
+      !has_AIS & has_SAR ~ "Only SAR",
+      TRUE ~ "No fishing detected"
+    )
+  )
+
+validation_data <- validation_data %>% filter(data_category == "Both AIS and SAR")
+
+# Evaluate all models
+results_no_transform <- evaluate_model(rf_model_no_transform, validation_data)
+
+validation_data_logpres <- validation_data %>%
+  mutate(log_total_presence_score = log10(total_presence_score + 1))
+
+results_original <- evaluate_model(rf_model_original, validation_data_logpres)
+
+# Add evaluation for the new model (fishing hours log-transformed)
+results_fishing_log <- evaluate_model(rf_model_fishing_log, validation_data, log_target = TRUE)
+
+results_log <- evaluate_model(rf_model_log, validation_data_logpres, log_target = TRUE)
+
+# Create a data frame with the results
+results_df <- data.frame(
+  Metric = c(
+  "Mean absolute error",                    # MAE
+  "Root mean squared error",                # RMSE
+  "Mean absolute percentage error",         # MAPE
+  "Median absolute error",                  # MdAE
+  "R-squared",                              # R² or R2
+  "Adjusted R-squared",                     # Adj. R²
+  "Mean of residuals",
+  "Standard deviation of residuals"
+),
+  No_Transform = c(results_no_transform$`Mean Absolute Error`, results_no_transform$`Root Mean Squared Error`, results_no_transform$`Mean Absolute Percentage Error`, results_no_transform$`Median Absolute Error`, results_no_transform$`R-Squared`, results_no_transform$`Adjusted R-Squared`, results_no_transform$`Mean of Residuals`, results_no_transform$`Standard Deviation of Residuals`),
+  Fishing_Log = c(results_fishing_log$`Mean Absolute Error`, results_fishing_log$`Root Mean Squared Error`, results_fishing_log$`Mean Absolute Percentage Error`, results_fishing_log$`Median Absolute Error`, results_fishing_log$`R-Squared`, results_fishing_log$`Adjusted R-Squared`, results_fishing_log$`Mean of Residuals`, results_fishing_log$`Standard Deviation of Residuals`),
+  Presence_Log = c(results_original$`Mean Absolute Error`, results_original$`Root Mean Squared Error`, results_original$`Mean Absolute Percentage Error`, results_original$`Median Absolute Error`, results_original$`R-Squared`, results_original$`Adjusted R-Squared`, results_original$`Mean of Residuals`, results_original$`Standard Deviation of Residuals`),
+  Both_Log = c(results_log$`Mean Absolute Error`, results_log$`Root Mean Squared Error`, results_log$`Mean Absolute Percentage Error`, results_log$`Median Absolute Error`, results_log$`R-Squared`, results_log$`Adjusted R-Squared`, results_log$`Mean of Residuals`, results_log$`Standard Deviation of Residuals`)
+)
+
+# Create and save the table as HTML
+table_output <- kable(results_df, format = "html", digits = 3,
+      col.names = c("Metric", "No transform", "Fishing hours log", "Presence score log", "Both log"),
+      caption = "Model performance comparison") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE) %>%
+  add_header_above(c(" " = 1, "Models" = 4)) %>%
+  column_spec(1, bold = TRUE)
+
+# Save as HTML first
+save_kable(table_output, file = here::here("Outputs", "model_performance.html"))
+
+# Then screenshot with custom viewport
+webshot(here::here("Outputs", "model_performance.html"), 
+        here::here("Outputs", "model_performance.png"),
+        vwidth = 800,   # Width in pixels
+        vheight = 400,  # Height in pixels - adjust as needed
+        zoom = 2)
+
+```
+
+#### Interpretation of model comparison metrics 
+Based on the provided performance metrics, I would choose the Fishing Hours Log-Transformed Model. Here's the reasoning:
+
+1. R-Squared and Adjusted R-Squared: The Fishing Hours Log model has the highest R-squared (0.8239) and Adjusted R-squared values, indicating it explains the most variance in the data.
+2. Mean Absolute Percentage Error (MAPE): This model has a significantly lower MAPE (69.71%) compared to the No Transform and Presence Log models (both over 1200%). This suggests much better relative accuracy.
+Median Absolute Error: It has the lowest median absolute error (10.19), which indicates good performance on typical cases.
+3. Root Mean Squared Error (RMSE): While higher than the No Transform model, the difference isn't as dramatic as the improvement in MAPE.
+4. Mean Absolute Error (MAE): Although higher than No Transform and Presence Log models, this should be considered in context with other metrics.
+
+The Both Log model performs very similarly to the Fishing Hours Log model, but the latter edges it out slightly in most metrics.
+
+The No Transform and Presence Log models, despite having lower MAE and RMSE, have extremely high MAPE values, suggesting they might be making large relative errors, especially on smaller values.
+
+The logarithmic transformation of fishing hours seems to have addressed some issues with the data distribution, leading to more balanced performance across different scales of the target variable.
+
+In conclusion, the Fishing Hours Log-Transformed Model appears to offer the best overall performance, particularly in terms of explained variance and relative error metrics. However, the choice might depend on the specific requirements of your application, such as whether absolute or relative errors are more important in your context.
+
+### Selected Model performance
+```{r}
+
+evaluate_model <- function(model, data, log_target = FALSE) {
+  predictions <- predict(model, newdata = data)
+  if (log_target) {
+    predictions <- 10^predictions - 1
+  }
+  
+  actual <- if (log_target) 10^data$log_total_fishing_hours - 1 else data$total_fishing_hours
+  
+  # Basic Error Metrics
+  mae <- mean(abs(actual - predictions), na.rm = TRUE)
+  rmse <- sqrt(mean((actual - predictions)^2, na.rm = TRUE))
+  mape <- mean(abs((actual - predictions) / actual) * 100, na.rm = TRUE)
+  medae <- median(abs(actual - predictions), na.rm = TRUE)
+  
+  # R-squared (matching randomForest's % Var explained)
+  r_squared <- model$rsq[length(model$rsq)]
+  
+  # Adjusted R-squared
+  n <- length(actual)
+  p <- length(model$forest$independent.variable.names)
+  adj_r_squared <- 1 - ((1 - r_squared) * (n - 1) / (n - p - 1))
+  
+  # Residual Analysis
+  residuals <- actual - predictions
+  mean_residual <- mean(residuals, na.rm = TRUE)
+  sd_residual <- sd(residuals, na.rm = TRUE)
+  
+  # Feature Importance (for Random Forest)
+  feature_importance <- importance(model)
+  
+  return(list(
+    "Mean absolute error" = mae,
+    "Root mean squared error" = rmse,
+    "Mean absolute percentage error" = mape,
+    "Median absolute error" = medae,  # FIXED TYPO
+    "R-squared" = r_squared,
+    "Adjusted R-squared" = adj_r_squared,  # FIXED CASE
+    "Mean of residuals" = mean_residual,
+    "Standard deviation of residuals" = sd_residual,
+    "Feature importance" = feature_importance
+  ))
+}
+
+validation_data <- combined_data_with_rasters %>%
+  mutate(
+    data_category = case_when(
+      has_AIS & has_SAR ~ "Both AIS and SAR",
+      has_AIS & !has_SAR ~ "Only AIS",
+      !has_AIS & has_SAR ~ "Only SAR",
+      TRUE ~ "No fishing detected"
+    ),
+    log_total_fishing_hours = log10(total_fishing_hours + 1)
+  )
+
+# Evaluate the model
+validation_data <- validation_data %>% filter(data_category == "Both AIS and SAR")
+results_rf_fishing_log <- evaluate_model(rf_model_fishing_log, validation_data, log_target = TRUE)
+
+# Create a dataframe for the table
+results_table <- data.frame(
+  Metric = c("Mean absolute error", "Root mean squared error", "Mean absolute percentage error",
+             "Median absolute error", "R-squared", "Adjusted R-squared",
+             "Mean of residuals", "Standard deviation of residuals"),
+  Value = round(c(results_rf_fishing_log$`Mean absolute error`,
+                  results_rf_fishing_log$`Root mean squared error`,
+                  results_rf_fishing_log$`Mean absolute percentage error`,
+                  results_rf_fishing_log$`Median absolute error`,  # FIXED: was "Median ebsolute error"
+                  results_rf_fishing_log$`R-squared`,
+                  results_rf_fishing_log$`Adjusted R-squared`,  # FIXED: was "Adjusted r-squared"
+                  results_rf_fishing_log$`Mean of residuals`,
+                  results_rf_fishing_log$`Standard deviation of residuals`),
+                2))
+
+table_output <- kable(results_table, format = "html", digits = 4, 
+      caption = "Model evaluation metrics for log-transformed fishing hours model") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = TRUE,
+                position = "center")
+
+# Save as HTML first
+save_kable(table_output, file = here::here("Outputs", "model_evaluation.html"))
+
+# Then screenshot with custom viewport
+webshot(here::here("Outputs", "model_evaluation.html"), 
+        here::here("Outputs", "model_evaluation.png"),
+        vwidth = 800,   # Width in pixels
+        vheight = 360,  # Height in pixels - adjust as needed
+        zoom = 2)
+
+# For feature importance, create a separate table
+# Use $ before the backticks
+feature_importance <- as.data.frame(results_rf_fishing_log$`Feature importance`)
+feature_importance$Feature <- rownames(feature_importance)
+feature_importance <- feature_importance[, c("Feature", "%IncMSE", "IncNodePurity")]
+colnames(feature_importance) <- c("Feature", "%IncMSE", "IncNodePurity")
+
+# Sort the feature importance table by %IncMSE in descending order
+feature_importance <- feature_importance[order(-feature_importance$`%IncMSE`), ]
+
+# Create the table
+table_output <- kable(feature_importance, format = "html", digits = 4, 
+      col.names = c("Feature", "%IncMSE", "IncNodePurity"),
+      caption = "Feature importance for log-transformed fishing hours model") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = TRUE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:3, width = "150px")
+
+# Save as HTML first
+save_kable(table_output, file = here::here("Outputs", "feature_importance.html"))
+
+# Then screenshot with custom viewport
+webshot(here::here("Outputs", "feature_importance.html"), 
+        here::here("Outputs", "feature_importance.png"),
+        vwidth = 720,   # Width in pixels
+        vheight = 300,  # Height in pixels - adjust as needed
+        zoom = 2)
+```
+
+
+### Maps of predictions 
+```{r}
+# Prepare the prediction data
+prediction_data <- combined_data_with_rasters %>%
+  dplyr::select(total_presence_score, lon_std, lat_std, dist_shore, dist_ports, bathy)
+
+# Make predictions
+log_predictions <- predict(rf_model_fishing_log, newdata = prediction_data)
+
+# Back-transform predictions
+predictions <- 10^log_predictions - 1
+
+# Add predictions to the original dataset
+combined_data_01deg <- combined_data_01deg %>%
+  mutate(
+    predicted_fishing_hours = case_when(
+      has_AIS ~ total_fishing_hours,
+      has_SAR ~ predictions[match(paste(lon_std, lat_std), paste(prediction_data$lon_std, prediction_data$lat_std))],
+      TRUE ~ 0
+    )
+  )
+
+#Violin plot of observed versus predicted fishing hours 
+# Prepare data for plotting
+plot_data <- combined_data_01deg %>%
+  mutate(
+    ais_fishing_hours = if_else(has_AIS, total_fishing_hours, NA_real_),
+    sar_predicted_hours = if_else(!has_AIS & has_SAR, predicted_fishing_hours, NA_real_)
+  ) %>%
+  dplyr::select(ais_fishing_hours, sar_predicted_hours) %>%
+  pivot_longer(cols = c(ais_fishing_hours, sar_predicted_hours),
+               names_to = "type",
+               values_to = "hours") %>%
+  filter(!is.na(hours))
+
+# Create violin plot
+violin_plot <- ggplot(plot_data, aes(x = type, y = hours, fill = type)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white", color = "black", alpha = 0.5, outlier.shape = NA) +
+  scale_y_log10(labels = scales::comma_format(accuracy = 1)) +
+  scale_x_discrete(labels = c("ais_fishing_hours" = "AIS Data", 
+                              "sar_predicted_hours" = "SAR Predictions")) +
+  labs(title = "Comparison of AIS Fishing Hours and SAR Predicted Fishing Hours",
+       subtitle = "AIS data for AIS-covered areas, Predictions for SAR-only areas",
+       x = "",
+       y = "Fishing Hours (log scale)",
+       fill = "Type") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Print the plot
+print(violin_plot)
+
+# Map of predicted fishing hours only 
+# Prepare the data for the map
+map_data <- combined_data_01deg %>%
+  filter(!has_AIS & has_SAR) %>%
+  dplyr::select(lon_std, lat_std, predicted_fishing_hours)
+
+# The map_data now contains back-transformed predictions, so no further transformation is needed
+
+#predicted_SAR_only_1RF=map_data
+#save(predicted_SAR_only_1RF, file="predicted_SAR_only_1RF.Rdata")
+
+# Create the world map
+world_map <- map_data("world")
+
+# Function to create map for a specific region
+create_region_map <- function(data, world_map, lon_col, lat_col, lon_range, lat_range, title, subtitle) {
+  ggplot() +
+    geom_map(data = world_map, map = world_map,
+             aes(long, lat, map_id = region),
+             color = "darkgray", fill = "lightgray", size = 0.1) +
+    geom_tile(data = data, 
+              aes(x = .data[[lon_col]], y = .data[[lat_col]], fill = predicted_fishing_hours)) +
+    scale_fill_viridis(
+      option = "inferno",
+      direction = -1,
+      trans = "log1p",
+      name = "Predicted fishing hours (2017-2020)", 
+      breaks = c(0, 1, 10, 100, 1000, 10000, 100000, 1000000),
+      labels = scales::comma,
+      guide = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top", title.hjust = 0.5)
+    ) +
+    coord_fixed(1.3, xlim = lon_range, ylim = lat_range) +
+    theme_minimal() +
+    labs(title = title,
+         subtitle = subtitle,
+         x = "Longitude", y = "Latitude") +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.box = "vertical",
+      legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
+      legend.title = element_text(margin = ggplot2::margin(b = 10))
+    )
+}
+
+# Global map
+predicted_SAR_only_plot <- create_region_map(map_data, world_map, "lon_std", "lat_std", c(-180, 180), c(-90, 90), "Predicted Fishing Hours in Areas with Only SAR Detections", "0.1 degree resolution")
+
+# Caribbean map
+caribbean_map <- create_region_map(map_data, world_map, "lon_std", "lat_std", c(-100, -50), c(0, 40), "Predicted Fishing Hours in the Caribbean", "0.1 degree resolution")
+
+# Northwestern Indian Ocean to Western European waters map
+indian_european_map <- create_region_map(map_data, world_map, "lon_std", "lat_std", c(-20, 80), c(0, 70), "Predicted Fishing Hours from Northern Indian Ocean \nto Eastern Atlantic", "0.1 degree resolution")
+
+# Asia map
+asia_map <- create_region_map(map_data, world_map, "lon_std", "lat_std", c(60, 180), c(-20, 60), "Predicted Fishing Hours in Asia", "0.1 degree resolution")
+
+# Print the maps
+#print(predicted_SAR_only_plot)
+print(caribbean_map)
+print(indian_european_map)
+print(asia_map)
+
+#Map of both original and predicted AIS fishing hours 
+# Visualize the results
+predicted_plot <- ggplot() +
+  geom_map(data = world_map, map = world_map,
+           aes(long, lat, map_id = region),
+           color = "black", fill = "lightgray", size = 0.1) +
+  geom_tile(data = combined_data_01deg, 
+            aes(x = lon_std, y = lat_std, fill = predicted_fishing_hours)) +
+  scale_fill_viridis(
+    option = "inferno",
+    direction = -1,
+    trans = "log1p",
+    name = "AIS fishing effort (hours; 2017-2020)", 
+    breaks = c(0, 1, 10, 100, 1000, 10000, 100000, 1000000),
+    labels = scales::comma,
+    guide = guide_colorbar(barwidth = 20, barheight = 0.5, title.position = "top", title.hjust = 0.5)
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal() +
+  labs(title = "Global fishing hours (0.1 degree resolution)",
+       subtitle = "Based on AIS data and random forest predictions from SAR data",
+       x = "Longitude", y = "Latitude") +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.margin = ggplot2::margin(t = 20, r = 0, b = 0, l = 0),
+    legend.title = element_text(margin = ggplot2::margin(b = 10))
+  )
+
+print(predicted_plot)
+
+# Save the plot
+ggsave(here::here("Outputs", "predicted_plot_SAR_only.png"), 
+       plot = predicted_plot,
+       width = 12, 
+       height = 8, 
+       dpi = 300)
+```
